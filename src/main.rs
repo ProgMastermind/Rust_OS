@@ -19,13 +19,13 @@ use my_os::{println, serial_println};
 /// Kernel entry point — called by the bootloader after setting up Long Mode.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    my_os::init(); // Initialize GDT, IDT, PICs, enable interrupts
+
     serial_println!("Kernel booted successfully!");
     println!("Hello from our OS!");
     println!("We are running bare-metal Rust on x86_64.");
     println!();
-    println!("There is no standard library here.");
-    println!("No filesystem. No processes. No memory allocator.");
-    println!("Just us and the hardware.");
+    println!("Interrupts enabled. Timer ticking. Try typing!");
 
     #[cfg(test)]
     test_main();

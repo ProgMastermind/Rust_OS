@@ -5,14 +5,28 @@
 
 #![no_std]
 #![cfg_attr(test, no_main)]
+#![feature(abi_x86_interrupt)]
 #![feature(custom_test_frameworks)]
 #![test_runner(test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+pub mod gdt;
+pub mod interrupts;
 pub mod serial;
 pub mod vga_buffer;
 
 use core::panic::PanicInfo;
+
+// Initialize all kernel subsystems.
+// Called from _start in main.rs (and from test entry points).
+// Order matters: GDT must be loaded before IDT (because the double fault
+// handler's IST entry references the TSS, which lives in the GDT).
+pub fn init() {
+    gdt::init();            // Load GDT + TSS (sets up IST stacks)
+    interrupts::init_idt(); // Load IDT (registers all exception/interrupt handlers)
+    unsafe { interrupts::PICS.lock().initialize() }; // Initialize + remap PICs
+    x86_64::instructions::interrupts::enable();      // sti — enable hardware interrupts
+}
 
 // ── Custom Test Framework ──────────────────────────────────────────────
 //
@@ -86,6 +100,7 @@ pub fn hlt_loop() -> ! {
 #[cfg(test)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    init(); // GDT, IDT, PICs must be set up even during tests
     test_main();
     hlt_loop();
 }
