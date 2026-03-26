@@ -29,6 +29,3 @@ test-args = [
 ]
 test-success-exit-code = 33
 
-[[test]]
-name = "basic_boot"
-harness = false

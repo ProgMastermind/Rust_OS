@@ -140,9 +140,9 @@ impl fmt::Write for Writer {
     }
 }
 
-/// Global writer instance, protected by a spinlock.
-/// `lazy_static!` lets us initialize it at runtime (we need a mutable reference
-/// to 0xB8000, which can't be created at compile time).
+// Global writer instance, protected by a spinlock.
+// `lazy_static!` lets us initialize it at runtime (we need a mutable reference
+// to 0xB8000, which can't be created at compile time).
 lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,

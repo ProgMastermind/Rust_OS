@@ -1,24 +1,25 @@
-/// my_os — An educational operating system built from scratch in Rust
-///
-/// This is the kernel entry point. When the machine boots:
-///   BIOS → bootloader → Long Mode (64-bit) → _start() right here
-///
-/// We are `#![no_std]` because there IS no standard library — we ARE the OS.
-/// We are `#![no_main]` because the C runtime's `main()` won't be called.
-/// Our entry point is `_start`, which the bootloader jumps to.
+// my_os — An educational operating system built from scratch in Rust
+//
+// This is the kernel entry point. When the machine boots:
+//   BIOS -> bootloader -> Long Mode (64-bit) -> _start() right here
+//
+// We are #![no_std] because there IS no standard library — we ARE the OS.
+// We are #![no_main] because the C runtime's main() won't be called.
+// Our entry point is _start, which the bootloader jumps to.
 
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
 #![test_runner(my_os::test_runner)]
-#![reexport_test_harness_entry = "test_main"]
+#![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use my_os::println;
+use my_os::{println, serial_println};
 
 /// Kernel entry point — called by the bootloader after setting up Long Mode.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    serial_println!("Kernel booted successfully!");
     println!("Hello from our OS!");
     println!("We are running bare-metal Rust on x86_64.");
     println!();

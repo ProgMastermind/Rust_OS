@@ -1,13 +1,13 @@
-/// Kernel library crate
-///
-/// This exists so that integration tests can import kernel functionality.
-/// The main.rs uses this as a dependency via `use my_os::...`.
+// Kernel library crate
+//
+// This exists so that integration tests can import kernel functionality.
+// The main.rs uses this as a dependency via `use my_os::...`.
 
 #![no_std]
 #![cfg_attr(test, no_main)]
 #![feature(custom_test_frameworks)]
 #![test_runner(test_runner)]
-#![reexport_test_harness_entry = "test_main"]
+#![reexport_test_harness_main = "test_main"]
 
 pub mod serial;
 pub mod vga_buffer;

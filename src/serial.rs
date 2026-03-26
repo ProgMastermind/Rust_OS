@@ -32,10 +32,8 @@ macro_rules! serial_print {
 /// Print to host terminal via serial port, with newline.
 #[macro_export]
 macro_rules! serial_println {
-    () => ($crate::serial_print!("\n"));
-    ($fmt:expr) => ($crate::serial_print!(concat!($fmt, "\n")));
-    ($fmt:expr, $($arg:tt)*) => ($crate::serial_print!(
-        concat!($fmt, "\n"), $($arg)*));
+    () => ($crate::serial::_print(format_args!("\n")));
+    ($($arg:tt)*) => ($crate::serial::_print(format_args!("{}\n", format_args!($($arg)*))));
 }
 
 #[doc(hidden)]
