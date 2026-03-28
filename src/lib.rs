@@ -10,8 +10,10 @@
 #![test_runner(test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+pub mod frame_allocator;
 pub mod gdt;
 pub mod interrupts;
+pub mod memory;
 pub mod serial;
 pub mod vga_buffer;
 

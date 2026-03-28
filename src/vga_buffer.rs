@@ -169,5 +169,14 @@ macro_rules! println {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    WRITER.lock().write_fmt(args).unwrap();
+    use x86_64::instructions::interrupts;
+
+    // Disable interrupts while holding the WRITER lock.
+    // Without this, a timer interrupt firing while println! holds the lock
+    // would try to print!(".") in the handler, which tries to lock WRITER
+    // again — deadlock. without_interrupts() disables interrupts (cli),
+    // runs the closure, then re-enables them (sti).
+    interrupts::without_interrupts(|| {
+        WRITER.lock().write_fmt(args).unwrap();
+    });
 }
