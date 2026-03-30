@@ -10,8 +10,15 @@
 #![test_runner(test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+// Enable the alloc crate — gives us Box, Vec, String, etc.
+// This works because we provide a #[global_allocator] in src/allocator/mod.rs.
+// Without that, linking would fail with "no global memory allocator found."
+extern crate alloc;
+
+pub mod allocator;
 pub mod frame_allocator;
 pub mod gdt;
+pub mod heap;
 pub mod interrupts;
 pub mod memory;
 pub mod serial;
