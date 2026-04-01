@@ -26,72 +26,103 @@ use my_os::{println, serial_println};
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    use alloc::{boxed::Box, string::String, vec, vec::Vec};
     use my_os::frame_allocator::BootInfoFrameAllocator;
     use my_os::memory;
+    use my_os::process::{self, ProcessState, PROCESS_TABLE};
     use x86_64::VirtAddr;
 
-    my_os::init(); // Initialize GDT, IDT, PICs, enable interrupts
+    my_os::init(); // Initialize GDT, IDT, PICs (interrupts NOT enabled yet)
 
     serial_println!("Kernel booted successfully!");
-    println!("Hello from our OS!");
-    println!("We are running bare-metal Rust on x86_64.");
-    println!();
 
     // ── Memory + Heap Setup ─────────────────────────────────────────
-    //
-    // 1. Initialize page tables (Session 3)
-    // 2. Initialize frame allocator (Session 3)
-    // 3. Map heap pages and initialize the allocator (Session 4 — NEW)
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
 
-    // Map virtual pages for the kernel heap and initialize the allocator.
-    // After this call, Box, Vec, String all work!
     my_os::heap::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
-    serial_println!("Heap initialized: {}KB at {:#x}",
-        my_os::heap::HEAP_SIZE / 1024, my_os::heap::HEAP_START);
+    serial_println!("Heap initialized");
 
-    // ── Heap Allocation Demo ────────────────────────────────────────
+    // ── Process Setup (Session 5) ───────────────────────────────────
     //
-    // These would have been impossible before Session 4.
-    // Each one calls our GlobalAlloc implementation under the hood.
+    // Spawn three processes that each print a letter in a loop.
+    // The round-robin scheduler switches between them on each timer tick.
+    // Expected output: interleaved A, B, C characters.
 
-    // Box::new() allocates on the heap and returns a pointer.
-    // Before: impossible (no allocator). Now: works!
-    let heap_value = Box::new(42);
-    println!("Box::new(42) = {}", heap_value);
-    serial_println!("Box::new(42) at {:p} = {}", heap_value, heap_value);
+    println!("Spawning 3 processes...");
+    serial_println!("Spawning 3 processes...");
 
-    // Vec dynamically grows — reallocates as it fills up.
-    // Starts with 0 capacity, grows to 4, 8, 16, ... as you push.
-    let mut numbers: Vec<i32> = Vec::new();
-    for i in 0..500 {
-        numbers.push(i);
+    {
+        let mut table = PROCESS_TABLE.lock();
+
+        // Register kernel_main itself as process 0 (the "idle" process).
+        // This is the currently running process — we need it in the table
+        // so the scheduler can save its state and switch away from it.
+        table.processes.push(process::Process {
+            pid: 0,
+            state: ProcessState::Running,
+            stack_pointer: 0, // Will be filled by context_switch when we switch away
+            entry_fn: None,   // Idle process has no entry — it IS kernel_main
+            _stack: alloc::vec::Vec::new(), // kernel_main uses the bootloader's stack
+        });
+        table.next_pid = 1;
+        table.current = 0;
+
+        // Spawn the three worker processes.
+        // spawn() stores the entry function directly in the Process struct (PCB).
+        table.spawn(process_a);
+        table.spawn(process_b);
+        table.spawn(process_c);
+
+        serial_println!("Process table: {} processes", table.processes.len());
     }
-    println!("Vec with {} elements, last = {}", numbers.len(), numbers[499]);
-    serial_println!("Vec: len={}, capacity={}", numbers.len(), numbers.capacity());
 
-    // vec![] macro — allocates and initializes in one step.
-    let v = vec![1, 2, 3, 4, 5];
-    println!("vec![1,2,3,4,5] sum = {}", v.iter().sum::<i32>());
-
-    // String is a heap-allocated, growable UTF-8 string.
-    let mut s = String::from("Hello");
-    s.push_str(" from the kernel heap!");
-    println!("{}", s);
-    serial_println!("String: len={}, capacity={}", s.len(), s.capacity());
-
+    println!("Processes spawned. Scheduler active.");
+    println!("Watch for interleaved A/B/C output:");
     println!();
-    println!("Kernel heap working! Box, Vec, String all functional.");
+
+    // NOW enable interrupts — heap, process table, and scheduler are all ready.
+    // Before this point, no timer interrupts fire and no scheduling happens.
+    my_os::enable_interrupts();
 
     #[cfg(test)]
     test_main();
 
+    // kernel_main becomes the idle process.
+    // When no other process is Ready, the scheduler runs this.
+    // hlt saves power while waiting for the next timer interrupt.
     my_os::hlt_loop();
+}
+
+// ── Demo Processes ────────────────────────────────────────────────────
+//
+// Each process prints a single character in a loop.
+// The scheduler preemptively switches between them.
+// Expected output: ABCABCABC... (interleaved)
+
+fn process_a() {
+    loop {
+        my_os::print!("A");
+        // hlt waits for next interrupt — saves CPU, and the timer interrupt
+        // will preempt us and switch to the next process
+        x86_64::instructions::hlt();
+    }
+}
+
+fn process_b() {
+    loop {
+        my_os::print!("B");
+        x86_64::instructions::hlt();
+    }
+}
+
+fn process_c() {
+    loop {
+        my_os::print!("C");
+        x86_64::instructions::hlt();
+    }
 }
 
 /// Panic handler — called when the kernel panics.

@@ -153,19 +153,26 @@ extern "x86-interrupt" fn page_fault_handler(
 
 // Timer interrupt (IRQ 0, remapped to interrupt 32).
 // The PIT (Programmable Interval Timer) chip fires this ~18.2 times/sec.
-// We print a dot on each tick to prove it's working.
 //
-// CRITICAL: We MUST send an End of Interrupt (EOI) signal to the PIC
-// after handling. If we forget, the PIC thinks we're still handling
-// this interrupt and BLOCKS all further interrupts of equal or lower
-// priority. The keyboard would stop working. Everything freezes.
+// This is now the heartbeat of our scheduler. On each tick:
+//   1. Send EOI to PIC (must be done BEFORE context switch, because
+//      the switch might not return to this handler for a while)
+//   2. Call the scheduler, which may context switch to another process
+//
+// CRITICAL: EOI must be sent BEFORE schedule(). If we switch to another
+// process before sending EOI, the PIC thinks we're still handling this
+// interrupt and blocks all future timer interrupts. The scheduler would
+// never fire again.
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    print!(".");
-
+    // Send EOI first — before the scheduler potentially switches us out
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
+
+    // Call the scheduler — may context switch to another process.
+    // If no processes are spawned, this is a no-op.
+    crate::process::scheduler::schedule();
 }
 
 // Keyboard interrupt (IRQ 1, remapped to interrupt 33).
