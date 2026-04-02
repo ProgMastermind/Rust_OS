@@ -6,22 +6,27 @@
 // All of these run in kernel mode with interrupts disabled (inside
 // the int 0x80 handler). They access the process table to get the
 // current process's file descriptor table.
+//
+// Error codes follow the errno convention defined in syscall/mod.rs:
+//   EFAULT = bad pointer, EBADF = bad fd, ENOENT = file not found, etc.
 
 use crate::fs::initrd::RAMDISK;
 use crate::fs::{FdEntry, FileSystem};
 use crate::process::PROCESS_TABLE;
+use super::{EBADF, EINVAL, ENOENT, EPERM, EROFS};
 
-// sys_write(fd, buf_ptr, len) -> bytes_written or -1
+// sys_write(fd, buf_ptr, len) -> bytes_written or negative error
 //
 // Write `len` bytes from the buffer at `buf_ptr` to file descriptor `fd`.
-//   fd 1 (stdout) → print to VGA screen
-//   fd 2 (stderr) → print to serial port
-//   Other fds → error (ramdisk is read-only)
+//   fd 1 (stdout) → VGA screen
+//   fd 2 (stderr) → serial port
+//   Other file fds → EROFS (ramdisk is read-only)
 pub fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> i64 {
-    // Reconstruct the byte slice from the raw pointer and length.
-    // SAFETY: In Ring 0, all addresses are valid kernel addresses.
-    // In a real Ring 3 setup, we'd validate that buf_ptr is in user space.
-    let buf = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
+    // Validate the pointer before creating a slice.
+    let buf = match unsafe { super::slice_from_user_ptr(buf_ptr, len) } {
+        Ok(b) => b,
+        Err(e) => return e, // EFAULT or EINVAL
+    };
 
     match fd {
         1 => {
@@ -29,7 +34,6 @@ pub fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> i64 {
             if let Ok(s) = core::str::from_utf8(buf) {
                 crate::print!("{}", s);
             } else {
-                // Not valid UTF-8 — print byte by byte as hex
                 for &byte in buf {
                     crate::print!("\\x{:02x}", byte);
                 }
@@ -47,39 +51,43 @@ pub fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> i64 {
             }
             len as i64
         }
-        _ => {
-            // Ramdisk files are read-only. Writing to them is an error.
-            -1
-        }
+        0 => EBADF, // Can't write to stdin
+        _ => EROFS,  // Ramdisk files are read-only
     }
 }
 
-// sys_read(fd, buf_ptr, len) -> bytes_read or -1
+// sys_read(fd, buf_ptr, len) -> bytes_read or negative error
 //
 // Read up to `len` bytes from file descriptor `fd` into the buffer at `buf_ptr`.
-// Returns the number of bytes actually read (0 at end of file).
+// Returns 0 at end of file.
 pub fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len as usize) };
+    // Validate the pointer before creating a mutable slice.
+    let buf = match unsafe { super::slice_from_user_ptr_mut(buf_ptr, len) } {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+
     let fd_idx = fd as usize;
 
     match fd {
         0 => {
             // stdin — keyboard input. Not yet implemented.
-            // A real implementation would block until input is available.
             0
         }
-        1 | 2 => {
-            // Can't read from stdout or stderr
-            -1
-        }
+        1 | 2 => EBADF, // Can't read from stdout or stderr
         _ => {
-            // Read from a file descriptor
             let mut table = PROCESS_TABLE.lock();
             let current = table.current;
+
+            // Bounds check on process table
+            if current >= table.processes.len() {
+                return EINVAL;
+            }
+
             let process = &mut table.processes[current];
 
             if fd_idx >= process.fd_table.len() {
-                return -1; // Invalid fd
+                return EBADF; // fd number exceeds table size
             }
 
             match &mut process.fd_table[fd_idx] {
@@ -88,38 +96,45 @@ pub fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
                     position,
                 }) => {
                     let bytes_read = RAMDISK.read(*file_index, *position, buf);
-                    *position += bytes_read; // Advance the read position
+                    *position += bytes_read;
                     bytes_read as i64
                 }
-                _ => -1, // fd exists but isn't a file (or is None/closed)
+                Some(FdEntry::Stdin) | Some(FdEntry::Stdout) | Some(FdEntry::Stderr) => EBADF,
+                None => EBADF, // Slot is closed/empty
             }
         }
     }
 }
 
-// sys_open(path_ptr, path_len) -> fd or -1
+// sys_open(path_ptr, path_len) -> fd or negative error
 //
 // Open a file by path. Returns a new file descriptor number.
-// The fd is an index into the process's fd_table.
 pub fn sys_open(path_ptr: u64, path_len: u64) -> i64 {
-    // Reconstruct the path string
-    let path = unsafe {
-        let bytes = core::slice::from_raw_parts(path_ptr as *const u8, path_len as usize);
-        match core::str::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => return -1, // Invalid UTF-8 path
-        }
+    // Validate the path pointer
+    let path_bytes = match unsafe { super::slice_from_user_ptr(path_ptr, path_len) } {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return EINVAL, // Invalid UTF-8 in path
     };
 
     // Look up the file in the ramdisk
     let file_index = match RAMDISK.open(path) {
         Some(idx) => idx,
-        None => return -1, // File not found
+        None => return ENOENT, // File not found
     };
 
     // Add to the current process's fd table
     let mut table = PROCESS_TABLE.lock();
     let current = table.current;
+
+    if current >= table.processes.len() {
+        return EINVAL;
+    }
+
     let process = &mut table.processes[current];
 
     // Find the first free slot (None) in the fd table
@@ -129,7 +144,7 @@ pub fn sys_open(path_ptr: u64, path_len: u64) -> i64 {
         Some(fd) => {
             process.fd_table[fd] = Some(FdEntry::File {
                 file_index,
-                position: 0, // Start reading from the beginning
+                position: 0,
             });
             fd as i64
         }
@@ -145,7 +160,7 @@ pub fn sys_open(path_ptr: u64, path_len: u64) -> i64 {
     }
 }
 
-// sys_close(fd) -> 0 or -1
+// sys_close(fd) -> 0 or negative error
 //
 // Close a file descriptor. The fd slot becomes available for reuse.
 pub fn sys_close(fd: u64) -> i64 {
@@ -153,19 +168,25 @@ pub fn sys_close(fd: u64) -> i64 {
 
     let mut table = PROCESS_TABLE.lock();
     let current = table.current;
+
+    if current >= table.processes.len() {
+        return EINVAL;
+    }
+
     let process = &mut table.processes[current];
 
     if fd_idx >= process.fd_table.len() {
-        return -1; // Invalid fd
+        return EBADF;
     }
 
-    // Don't allow closing stdin, stdout, stderr
     match &process.fd_table[fd_idx] {
-        Some(FdEntry::Stdin) | Some(FdEntry::Stdout) | Some(FdEntry::Stderr) => -1,
+        Some(FdEntry::Stdin) | Some(FdEntry::Stdout) | Some(FdEntry::Stderr) => {
+            EPERM // Cannot close stdin/stdout/stderr
+        }
         Some(FdEntry::File { .. }) => {
-            process.fd_table[fd_idx] = None; // Free the slot
+            process.fd_table[fd_idx] = None;
             0
         }
-        None => -1, // Already closed
+        None => EBADF, // Already closed
     }
 }

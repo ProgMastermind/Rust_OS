@@ -9,21 +9,14 @@
 //   3. Parse the line into command + arguments
 //   4. Match command and execute
 //   5. Repeat
-//
-// This shell runs as a regular kernel task (spawned by the scheduler).
-// It uses the keyboard ring buffer to read input and print!/println!
-// for output. File operations go through the syscall interface.
 
 use crate::fs::FileSystem;
 use crate::keyboard;
 use crate::syscall;
 use crate::{print, println};
 
-// Maximum length of a single input line.
 const MAX_LINE_LENGTH: usize = 256;
 
-// Entry point for the shell process. Called by the scheduler when
-// this process first runs.
 pub fn shell_main() {
     println!();
     println!("Welcome to my_os shell!");
@@ -37,13 +30,13 @@ pub fn shell_main() {
         let len = read_line(&mut line_buf);
 
         if len == 0 {
-            continue; // Empty line — just print a new prompt
+            continue;
         }
 
         let line = match core::str::from_utf8(&line_buf[..len]) {
             Ok(s) => s.trim(),
             Err(_) => {
-                println!("Invalid input");
+                println!("Error: invalid UTF-8 input");
                 continue;
             }
         };
@@ -62,38 +55,33 @@ fn read_line(buf: &mut [u8]) -> usize {
         let c = keyboard::read_char();
 
         match c {
-            // Enter — line is complete
             b'\n' => {
-                println!(); // Move to next line
+                println!();
                 return pos;
             }
             // Backspace (0x08) or DEL (0x7F)
             0x08 | 0x7F => {
                 if pos > 0 {
                     pos -= 1;
-                    // Erase the character on screen: move cursor back, overwrite
-                    // with space, move cursor back again.
                     print!("\x08 \x08");
                 }
             }
-            // Printable ASCII
+            // Printable ASCII only — rejects control characters
             0x20..=0x7E => {
                 if pos < buf.len() - 1 {
                     buf[pos] = c;
                     pos += 1;
-                    // Echo the character to screen
                     print!("{}", c as char);
                 }
+                // If buffer is full, silently ignore further input
+                // (better than crashing — user can still press Enter)
             }
-            // Ignore everything else (control chars, extended keys)
-            _ => {}
+            _ => {} // Ignore non-printable characters
         }
     }
 }
 
-// Parse and execute a command line.
 fn execute_command(line: &str) {
-    // Split into command and arguments at the first space
     let (cmd, args) = match line.find(' ') {
         Some(pos) => (&line[..pos], line[pos + 1..].trim()),
         None => (line, ""),
@@ -108,7 +96,7 @@ fn execute_command(line: &str) {
         "pid" => cmd_pid(),
         "uptime" => cmd_uptime(),
         "exit" => cmd_exit(),
-        "" => {} // Empty command — do nothing
+        "" => {}
         _ => println!("Unknown command: '{}'. Type 'help' for available commands.", cmd),
     }
 }
@@ -126,6 +114,8 @@ fn cmd_help() {
 }
 
 fn cmd_echo(args: &str) {
+    // Print the argument as-is. Since read_line only accepts printable
+    // ASCII (0x20..=0x7E), no control characters can reach here.
     println!("{}", args);
 }
 
@@ -156,12 +146,18 @@ fn cmd_cat(args: &str) {
         0,
     );
 
+    // Check for errors using specific error codes
     if fd < 0 {
-        println!("File not found: '{}'", args);
+        match fd {
+            syscall::ENOENT => println!("cat: {}: No such file", args),
+            syscall::EFAULT => println!("cat: internal error (bad pointer)"),
+            syscall::EINVAL => println!("cat: {}: Invalid filename", args),
+            _ => println!("cat: {}: Error ({})", args, syscall::errno_name(fd)),
+        }
         return;
     }
 
-    // Read and print in chunks
+    // Read and print in chunks until EOF
     let mut buf = [0u8; 256];
     loop {
         let bytes_read = syscall::syscall(
@@ -171,26 +167,44 @@ fn cmd_cat(args: &str) {
             buf.len() as u64,
         );
 
-        if bytes_read <= 0 {
-            break; // EOF or error
+        if bytes_read < 0 {
+            // Read error — report it
+            println!("cat: read error: {}", syscall::errno_name(bytes_read));
+            break;
+        }
+
+        if bytes_read == 0 {
+            break; // EOF
         }
 
         // Write to stdout via syscall
-        syscall::syscall(
+        let write_result = syscall::syscall(
             syscall::SYS_WRITE,
             1, // stdout
             buf.as_ptr() as u64,
             bytes_read as u64,
         );
+
+        if write_result < 0 {
+            println!("cat: write error: {}", syscall::errno_name(write_result));
+            break;
+        }
     }
 
-    // Close the file
-    syscall::syscall(syscall::SYS_CLOSE, fd as u64, 0, 0);
+    // Always close the file, even if reading failed
+    let close_result = syscall::syscall(syscall::SYS_CLOSE, fd as u64, 0, 0);
+    if close_result < 0 {
+        crate::serial_println!("cat: warning: close failed: {}", syscall::errno_name(close_result));
+    }
 }
 
 fn cmd_pid() {
     let pid = syscall::syscall(syscall::SYS_GETPID, 0, 0, 0);
-    println!("PID: {}", pid);
+    if pid < 0 {
+        println!("Error getting PID: {}", syscall::errno_name(pid));
+    } else {
+        println!("PID: {}", pid);
+    }
 }
 
 fn cmd_uptime() {
@@ -198,7 +212,6 @@ fn cmd_uptime() {
     use core::sync::atomic::Ordering;
 
     let ticks = TICKS.load(Ordering::Relaxed);
-    // PIT fires at ~18.2 Hz, so ticks / 18 ≈ seconds
     let seconds = ticks / 18;
     println!("Uptime: {} ticks (~{} seconds)", ticks, seconds);
 }
