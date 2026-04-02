@@ -54,6 +54,12 @@ pub struct Process {
     // The process's RSP points somewhere inside this Vec.
     // We keep ownership here so the stack isn't freed while in use.
     pub _stack: Vec<u8>,
+    // Per-process file descriptor table (Session 6).
+    // Index = fd number. Entry = what that fd points to.
+    //   fd 0 = Stdin, fd 1 = Stdout, fd 2 = Stderr
+    //   fd 3+ = opened files (from sys_open)
+    //   None = closed/available slot
+    pub fd_table: Vec<Option<crate::fs::FdEntry>>,
 }
 
 // ── Process Table ─────────────────────────────────────────────────────
@@ -153,6 +159,12 @@ impl ProcessTable {
             stack_pointer: frame_start as u64,
             entry_fn: Some(entry_point), // Stored in the PCB — no global registry
             _stack: stack,
+            // Every process gets stdin/stdout/stderr by default
+            fd_table: alloc::vec![
+                Some(crate::fs::FdEntry::Stdin),  // fd 0
+                Some(crate::fs::FdEntry::Stdout), // fd 1
+                Some(crate::fs::FdEntry::Stderr), // fd 2
+            ],
         };
 
         self.processes.push(process);

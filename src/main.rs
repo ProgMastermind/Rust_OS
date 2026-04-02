@@ -27,8 +27,10 @@ entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     use my_os::frame_allocator::BootInfoFrameAllocator;
+    use my_os::fs::{self, FileSystem};
     use my_os::memory;
     use my_os::process::{self, ProcessState, PROCESS_TABLE};
+    use my_os::syscall;
     use x86_64::VirtAddr;
 
     my_os::init(); // Initialize GDT, IDT, PICs (interrupts NOT enabled yet)
@@ -45,84 +47,132 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         .expect("heap initialization failed");
     serial_println!("Heap initialized");
 
-    // ── Process Setup (Session 5) ───────────────────────────────────
+    // ── Process Setup ───────────────────────────────────────────────
     //
-    // Spawn three processes that each print a letter in a loop.
-    // The round-robin scheduler switches between them on each timer tick.
-    // Expected output: interleaved A, B, C characters.
-
-    println!("Spawning 3 processes...");
-    serial_println!("Spawning 3 processes...");
+    // Register kernel_main as process 0. We need at least one process
+    // in the table so syscalls like getpid can read the current process.
 
     {
         let mut table = PROCESS_TABLE.lock();
-
-        // Register kernel_main itself as process 0 (the "idle" process).
-        // This is the currently running process — we need it in the table
-        // so the scheduler can save its state and switch away from it.
         table.processes.push(process::Process {
             pid: 0,
             state: ProcessState::Running,
-            stack_pointer: 0, // Will be filled by context_switch when we switch away
-            entry_fn: None,   // Idle process has no entry — it IS kernel_main
-            _stack: alloc::vec::Vec::new(), // kernel_main uses the bootloader's stack
+            stack_pointer: 0,
+            entry_fn: None,
+            _stack: alloc::vec::Vec::new(),
+            fd_table: alloc::vec![
+                Some(fs::FdEntry::Stdin),  // fd 0
+                Some(fs::FdEntry::Stdout), // fd 1
+                Some(fs::FdEntry::Stderr), // fd 2
+            ],
         });
         table.next_pid = 1;
         table.current = 0;
-
-        // Spawn the three worker processes.
-        // spawn() stores the entry function directly in the Process struct (PCB).
-        table.spawn(process_a);
-        table.spawn(process_b);
-        table.spawn(process_c);
-
-        serial_println!("Process table: {} processes", table.processes.len());
     }
 
-    println!("Processes spawned. Scheduler active.");
-    println!("Watch for interleaved A/B/C output:");
+    // ── Syscall + Filesystem Demo (Session 6) ───────────────────────
+    //
+    // All interaction goes through the syscall interface:
+    //   user code → int 0x80 → kernel dispatcher → kernel function → return
+
+    println!("=== Syscall Demo ===");
     println!();
 
-    // NOW enable interrupts — heap, process table, and scheduler are all ready.
-    // Before this point, no timer interrupts fire and no scheduling happens.
+    // 1. sys_write: write to stdout (fd 1) via syscall instead of print!
+    let msg = b"Hello via sys_write to stdout!\n";
+    let written = syscall::syscall(
+        syscall::SYS_WRITE,
+        1, // fd 1 = stdout
+        msg.as_ptr() as u64,
+        msg.len() as u64,
+    );
+    serial_println!("sys_write returned: {} bytes", written);
+
+    // 2. sys_getpid: ask the kernel for our process ID
+    let pid = syscall::syscall(syscall::SYS_GETPID, 0, 0, 0);
+    println!("My PID (via sys_getpid): {}", pid);
+
+    // 3. List files in the ramdisk (direct VFS call, not a syscall)
+    println!();
+    println!("=== Ramdisk Files ===");
+    let ramdisk = &fs::initrd::RAMDISK;
+    for i in 0..ramdisk.file_count() {
+        if let Some(info) = ramdisk.file_at(i) {
+            println!("  {} ({} bytes)", info.name, info.size);
+        }
+    }
+
+    // 4. sys_open: open a file from the ramdisk
+    println!();
+    println!("=== File I/O via Syscalls ===");
+    let path = "hello.txt";
+    let fd = syscall::syscall(
+        syscall::SYS_OPEN,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        0,
+    );
+    println!("sys_open('{}') -> fd {}", path, fd);
+    serial_println!("sys_open('{}') -> fd {}", path, fd);
+
+    // 5. sys_read: read the file contents
+    let mut buf = [0u8; 128];
+    let bytes_read = syscall::syscall(
+        syscall::SYS_READ,
+        fd as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    );
+    let content = core::str::from_utf8(&buf[..bytes_read as usize]).unwrap_or("???");
+    println!("sys_read(fd {}) -> {} bytes: {}", fd, bytes_read, content.trim());
+    serial_println!("sys_read: {} bytes", bytes_read);
+
+    // 6. sys_close: close the file
+    let close_result = syscall::syscall(syscall::SYS_CLOSE, fd as u64, 0, 0);
+    println!("sys_close(fd {}) -> {}", fd, close_result);
+
+    // 7. Open and read a second file to prove it works for multiple files
+    let path2 = "readme.txt";
+    let fd2 = syscall::syscall(
+        syscall::SYS_OPEN,
+        path2.as_ptr() as u64,
+        path2.len() as u64,
+        0,
+    );
+    let mut buf2 = [0u8; 128];
+    let bytes2 = syscall::syscall(
+        syscall::SYS_READ,
+        fd2 as u64,
+        buf2.as_mut_ptr() as u64,
+        buf2.len() as u64,
+    );
+    let content2 = core::str::from_utf8(&buf2[..bytes2 as usize]).unwrap_or("???");
+    println!();
+    println!("sys_open('{}') -> fd {}", path2, fd2);
+    println!("sys_read: {}", content2.trim());
+    syscall::syscall(syscall::SYS_CLOSE, fd2 as u64, 0, 0);
+
+    // 8. Try opening a nonexistent file — should return -1
+    let bad_path = "nope.txt";
+    let bad_fd = syscall::syscall(
+        syscall::SYS_OPEN,
+        bad_path.as_ptr() as u64,
+        bad_path.len() as u64,
+        0,
+    );
+    println!();
+    println!("sys_open('{}') -> {} (expected -1: file not found)", bad_path, bad_fd);
+
+    println!();
+    println!("Syscall interface and filesystem working.");
+
+    // Enable interrupts so keyboard works
     my_os::enable_interrupts();
 
     #[cfg(test)]
     test_main();
 
-    // kernel_main becomes the idle process.
-    // When no other process is Ready, the scheduler runs this.
-    // hlt saves power while waiting for the next timer interrupt.
     my_os::hlt_loop();
-}
-
-// ── Demo Processes ────────────────────────────────────────────────────
-//
-// Each process prints a single character in a loop.
-// The scheduler preemptively switches between them.
-// Expected output: ABCABCABC... (interleaved)
-
-fn process_a() {
-    loop {
-        my_os::print!("A");
-        // hlt waits for next interrupt — saves CPU, and the timer interrupt
-        // will preempt us and switch to the next process
-        x86_64::instructions::hlt();
-    }
-}
-
-fn process_b() {
-    loop {
-        my_os::print!("B");
-        x86_64::instructions::hlt();
-    }
-}
-
-fn process_c() {
-    loop {
-        my_os::print!("C");
-        x86_64::instructions::hlt();
-    }
 }
 
 /// Panic handler — called when the kernel panics.

@@ -93,6 +93,11 @@ lazy_static! {
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
 
+        // Software interrupt 0x80 — syscall entry point.
+        // When user code executes `int 0x80`, the CPU jumps here.
+        // This is the same mechanism Linux used before syscall/sysret.
+        idt[0x80].set_handler_fn(crate::syscall::syscall_handler);
+
         idt
     };
 }

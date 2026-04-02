@@ -17,12 +17,14 @@ extern crate alloc;
 
 pub mod allocator;
 pub mod frame_allocator;
+pub mod fs;
 pub mod gdt;
 pub mod heap;
 pub mod interrupts;
 pub mod memory;
 pub mod process;
 pub mod serial;
+pub mod syscall;
 pub mod vga_buffer;
 
 use core::panic::PanicInfo;
