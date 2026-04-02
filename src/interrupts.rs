@@ -19,7 +19,7 @@
 //   Entry 33: Keyboard (IRQ 1) — a key was pressed or released
 
 use crate::gdt;
-use crate::{print, println};
+use crate::println;
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin;
@@ -154,21 +154,27 @@ extern "x86-interrupt" fn page_fault_handler(
     crate::hlt_loop();
 }
 
+// ── Timer Tick Counter ───────────────────────────────────────────────
+//
+// Incremented on every timer interrupt (~18.2 times/sec).
+// Readable via the `uptime` shell command.
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+pub static TICKS: AtomicU64 = AtomicU64::new(0);
+
 // ── Hardware Interrupt Handlers ──────────────────────────────────────
 
 // Timer interrupt (IRQ 0, remapped to interrupt 32).
 // The PIT (Programmable Interval Timer) chip fires this ~18.2 times/sec.
 //
-// This is now the heartbeat of our scheduler. On each tick:
-//   1. Send EOI to PIC (must be done BEFORE context switch, because
-//      the switch might not return to this handler for a while)
-//   2. Call the scheduler, which may context switch to another process
-//
-// CRITICAL: EOI must be sent BEFORE schedule(). If we switch to another
-// process before sending EOI, the PIC thinks we're still handling this
-// interrupt and blocks all future timer interrupts. The scheduler would
-// never fire again.
+// On each tick:
+//   1. Increment global tick counter (for uptime)
+//   2. Send EOI to PIC (before context switch!)
+//   3. Call the scheduler, which may context switch to another process
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    TICKS.fetch_add(1, Ordering::Relaxed);
+
     // Send EOI first — before the scheduler potentially switches us out
     unsafe {
         PICS.lock()
@@ -176,7 +182,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 
     // Call the scheduler — may context switch to another process.
-    // If no processes are spawned, this is a no-op.
     crate::process::scheduler::schedule();
 }
 
@@ -185,9 +190,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 // at I/O port 0x60. We MUST read port 0x60 — if we don't, the keyboard
 // controller won't send the next interrupt.
 //
-// We use the `pc-keyboard` crate to translate scancodes to characters.
-// Scancodes are hardware-level codes (e.g., 0x1E = 'A' key pressed,
-// 0x9E = 'A' key released). The crate handles shift, caps lock, etc.
+// Instead of printing directly, we push decoded characters into the
+// keyboard ring buffer. The shell reads from this buffer.
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use x86_64::instructions::port::Port;
@@ -203,20 +207,23 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
     let mut keyboard = KEYBOARD.lock();
 
-    // Read the scancode from port 0x60 — this is the keyboard controller's
-    // data port. Reading it also acknowledges the key event.
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
 
-    // add_byte: feed the raw scancode to the keyboard state machine.
-    // Returns Ok(Some(event)) if a complete key event was recognized.
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-        // process_keyevent: converts the key event to a character,
-        // handling shift, caps lock, etc.
         if let Some(key) = keyboard.process_keyevent(key_event) {
             match key {
-                DecodedKey::Unicode(character) => print!("{}", character),
-                DecodedKey::RawKey(key) => print!("{:?}", key),
+                DecodedKey::Unicode(character) => {
+                    // Push the character into the keyboard buffer.
+                    // The shell will read it via keyboard::read_char().
+                    if character.is_ascii() {
+                        crate::keyboard::push_char(character as u8);
+                    }
+                }
+                DecodedKey::RawKey(_key) => {
+                    // Raw keys (arrows, function keys, etc.) — ignored for now.
+                    // A more complete shell would handle these.
+                }
             }
         }
     }

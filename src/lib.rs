@@ -21,9 +21,11 @@ pub mod fs;
 pub mod gdt;
 pub mod heap;
 pub mod interrupts;
+pub mod keyboard;
 pub mod memory;
 pub mod process;
 pub mod serial;
+pub mod shell;
 pub mod syscall;
 pub mod vga_buffer;
 

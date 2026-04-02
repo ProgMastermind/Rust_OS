@@ -121,6 +121,14 @@ impl Writer {
         self.column_position = 0;
     }
 
+    /// Clear the entire screen and reset cursor to top-left.
+    pub fn clear_screen(&mut self) {
+        for row in 0..BUFFER_HEIGHT {
+            self.clear_row(row);
+        }
+        self.column_position = 0;
+    }
+
     /// Fill a row with blank spaces.
     fn clear_row(&mut self, row: usize) {
         let blank = ScreenChar {
