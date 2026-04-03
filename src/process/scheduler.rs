@@ -2,9 +2,10 @@
 //
 // The simplest fair scheduling algorithm:
 //   1. Timer interrupt fires (~18 times/sec)
-//   2. Save current process's state
-//   3. Pick the NEXT Ready process (wrap around at the end)
-//   4. Context switch to it
+//   2. Reap any terminated processes (free their resources)
+//   3. Save current process's state
+//   4. Pick the NEXT Ready process (wrap around at the end)
+//   5. Context switch to it
 //
 // Every process gets an equal time slice (~55ms per tick).
 // No priorities, no fairness weights — just take turns.
@@ -13,6 +14,7 @@
 
 use super::context_switch::context_switch;
 use super::{ProcessState, PROCESS_TABLE};
+use alloc::vec::Vec;
 
 // Called from the timer interrupt handler.
 // Decides whether to switch processes and performs the context switch.
@@ -33,9 +35,32 @@ pub fn schedule() {
         return;
     }
 
+    // ── Reap terminated processes ────────────────────────────────────
+    //
+    // Free the stack and fd_table of any Terminated process (except the
+    // currently running one — we can't free our own stack while using it).
+    // The slot stays in the Vec but its resources are released. The state
+    // changes to Empty so spawn() can reuse the slot later.
     let current_idx = table.current;
+    for i in 0..num_processes {
+        if i == current_idx {
+            continue; // Don't reap ourselves
+        }
+        if table.processes[i].state == ProcessState::Terminated {
+            // Free the process's resources
+            table.processes[i]._stack = Vec::new();     // Drop the 16KB stack
+            table.processes[i].fd_table = Vec::new();   // Drop fd table
+            table.processes[i].entry_fn = None;
+            table.processes[i].state = ProcessState::Empty;
+            crate::serial_println!(
+                "Reaped process PID {}",
+                table.processes[i].pid
+            );
+        }
+    }
 
-    // Find the next Ready process (round-robin: check each one in order)
+    // ── Find the next Ready process ─────────────────────────────────
+
     let mut next_idx = (current_idx + 1) % num_processes;
     let mut found = false;
 
@@ -48,37 +73,24 @@ pub fn schedule() {
     }
 
     if !found || next_idx == current_idx {
-        return;
+        return; // No other Ready process — keep running current
     }
 
-    // ── Perform the switch ────────────────────────────────────────────
+    // ── Perform the switch ──────────────────────────────────────────
 
-    // Mark old process as Ready (it's not Running anymore, but can be
-    // scheduled again). Only if it's still Running — it might have been
-    // marked Terminated by exit().
     if table.processes[current_idx].state == ProcessState::Running {
         table.processes[current_idx].state = ProcessState::Ready;
     }
 
-    // Mark new process as Running
     table.processes[next_idx].state = ProcessState::Running;
     table.current = next_idx;
 
-    // Get the raw pointers we need for context_switch.
-    // We need:
-    //   - A pointer to old process's stack_pointer field (to save RSP into)
-    //   - The value of new process's stack_pointer (to load RSP from)
     let old_rsp_ptr = &mut table.processes[current_idx].stack_pointer as *mut u64;
     let new_rsp = table.processes[next_idx].stack_pointer;
 
-    // CRITICAL: Drop the lock BEFORE context switching.
-    // If we hold the lock during the switch, the new process can't
-    // acquire it when IT gets interrupted (deadlock).
+    // Drop the lock BEFORE context switching to avoid deadlock.
     drop(table);
 
-    // Perform the actual context switch.
-    // After this call returns (from the perspective of the OLD process),
-    // we've been switched back. Time has passed — other processes ran.
     unsafe {
         context_switch(old_rsp_ptr, new_rsp);
     }

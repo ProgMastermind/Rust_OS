@@ -58,8 +58,14 @@ impl RingBuffer {
 static KEYBOARD_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
 
 // Called by the keyboard interrupt handler to push a character.
+// Logs a warning to serial if the buffer is full and input is dropped.
 pub fn push_char(c: u8) {
-    KEYBOARD_BUFFER.lock().push(c);
+    if !KEYBOARD_BUFFER.lock().push(c) {
+        // Buffer is full. Log to serial (not VGA — we're in an interrupt handler
+        // and don't want to contend for the VGA lock). This tells the developer
+        // that input is being lost, rather than failing silently.
+        crate::serial_println!("WARNING: keyboard buffer full, dropped '{}'", c as char);
+    }
 }
 
 // Called by the shell (or any consumer) to read a character.

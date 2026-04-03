@@ -1,83 +1,134 @@
-// Physical Frame Allocator
+// Bitmap Frame Allocator
 //
 // Physical RAM is divided into 4KB chunks called "frames." The frame allocator
-// tracks which frames are free and which are in use.
+// tracks which frames are free and which are in use via a BITMAP:
+//   - One bit per frame: 0 = free, 1 = used
+//   - alloc: scan for first 0 bit, set to 1, return the frame — O(n/64)
+//   - dealloc: set bit to 0 — O(1)
 //
-// We implement a BUMP ALLOCATOR: the simplest possible strategy.
-//   - Keep a counter `next` starting at 0
-//   - On allocate: find the Nth usable frame, increment counter
-//   - On deallocate: do nothing (frames are never freed)
+// This replaces the old bump allocator which was O(n²) per allocation
+// (it recreated the iterator each time) and could never free frames.
 //
-// This is wasteful but perfectly fine for now. We only allocate frames when
-// creating new page table entries, and we won't be freeing page tables yet.
-// Session 4 will add proper deallocation.
-//
-// The bootloader provides a MemoryMap that tells us which physical memory
-// regions are usable. We filter for MemoryRegionType::Usable and iterate
-// over all frames within those regions.
+// The bitmap lives in a static array (4KB, supports up to 128MB RAM).
+// We use a static instead of the heap because the frame allocator is needed
+// BEFORE the heap is initialized (the heap itself needs frames).
 
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+use spin::Mutex;
 use x86_64::structures::paging::{FrameAllocator, PhysFrame, Size4KiB};
 use x86_64::PhysAddr;
 
-// A frame allocator that returns usable frames from the bootloader's memory map.
-pub struct BootInfoFrameAllocator {
-    memory_map: &'static MemoryMap,
-    next: usize, // Index of the next frame to return
+const FRAME_SIZE: usize = 4096;
+
+// Support up to 128MB of physical RAM (QEMU default).
+// 128MB / 4KB = 32768 frames. 32768 bits = 512 u64s = 4KB for the bitmap.
+const MAX_FRAMES: usize = 32768;
+const BITMAP_WORDS: usize = MAX_FRAMES / 64;
+
+// The bitmap: one bit per frame.
+//   bit = 1 → frame is in use (or reserved/non-existent)
+//   bit = 0 → frame is free
+//
+// Starts with ALL bits set to 1 (everything "used"). init() clears bits
+// for usable frames based on the bootloader's memory map. This is safe:
+// unknown/reserved memory stays marked as used and is never handed out.
+static BITMAP: Mutex<[u64; BITMAP_WORDS]> = Mutex::new([!0u64; BITMAP_WORDS]);
+
+pub struct BitmapFrameAllocator {
+    // Optimization: start scanning from here instead of frame 0 every time.
+    // After a successful alloc, next_scan advances past the allocated frame.
+    // Wraps around to 0 when reaching MAX_FRAMES.
+    next_scan: usize,
 }
 
-impl BootInfoFrameAllocator {
-    // Create a new allocator from the bootloader's memory map.
+impl BitmapFrameAllocator {
+    // Initialize the bitmap from the bootloader's memory map.
     //
-    // SAFETY: The caller must guarantee that the memory map is valid and that
-    // all frames marked as USABLE are truly unused. The bootloader guarantees
-    // this — it marks its own frames as Bootloader/PageTable/etc.
+    // Walks every region in the map. For regions marked as Usable,
+    // clears the corresponding bits in the bitmap (marking them free).
+    //
+    // SAFETY: Caller must guarantee the memory map is valid and that
+    // usable regions are truly unused. The bootloader guarantees this.
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
-        BootInfoFrameAllocator {
-            memory_map,
-            next: 0,
+        let mut bitmap = BITMAP.lock();
+
+        for region in memory_map.iter() {
+            if region.region_type == MemoryRegionType::Usable {
+                let start_frame = region.range.start_addr() as usize / FRAME_SIZE;
+                let end_frame = region.range.end_addr() as usize / FRAME_SIZE;
+
+                for frame_idx in start_frame..end_frame.min(MAX_FRAMES) {
+                    let word = frame_idx / 64;
+                    let bit = frame_idx % 64;
+                    bitmap[word] &= !(1u64 << bit); // Clear bit = mark free
+                }
+            }
         }
+
+        BitmapFrameAllocator { next_scan: 0 }
     }
 
-    // Returns an iterator over all usable physical frames.
+    // Free a frame, making it available for future allocation.
     //
-    // The chain of operations:
-    //   1. Iterate over all memory regions in the map
-    //   2. Filter for regions marked as Usable
-    //   3. For each region, generate all frame-aligned addresses within it
-    //   4. Convert each address to a PhysFrame
-    //
-    // This creates a lazy iterator — no allocation needed.
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
-        // Step 1: Get all memory regions from the map
-        let regions = self.memory_map.iter();
+    // This is the key improvement over the bump allocator: frames can be
+    // returned to the pool. Used when unmapping pages or cleaning up processes.
+    pub fn deallocate_frame(&mut self, frame: PhysFrame) {
+        let frame_idx = frame.start_address().as_u64() as usize / FRAME_SIZE;
+        if frame_idx < MAX_FRAMES {
+            let mut bitmap = BITMAP.lock();
+            let word = frame_idx / 64;
+            let bit = frame_idx % 64;
+            bitmap[word] &= !(1u64 << bit); // Clear bit = mark free
 
-        // Step 2: Keep only usable regions (not reserved, not BIOS, not kernel, etc.)
-        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
-
-        // Step 3: Convert each region to a range of frame-aligned physical addresses
-        // A region has start_addr and end_addr. We generate addresses at 4KB intervals.
-        let addr_ranges = usable_regions.map(|r| r.range.start_addr()..r.range.end_addr());
-
-        // Step 4: Flatten all ranges into a single iterator of addresses,
-        // stepping by 4096 (one frame = 4KB = 4096 bytes)
-        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
-
-        // Step 5: Convert each physical address to a PhysFrame type
-        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+            // Update scan hint: if this freed frame is before our scan position,
+            // move the scan back so we find it sooner.
+            if frame_idx < self.next_scan {
+                self.next_scan = frame_idx;
+            }
+        }
     }
 }
 
 // Implement the FrameAllocator trait from the x86_64 crate.
-// This is the interface that OffsetPageTable uses when it needs a new frame
-// (e.g., when creating a new page table level during map_to).
-unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
+// This is the interface that OffsetPageTable::map_to() uses when it needs
+// a new physical frame (e.g., for a new page table level).
+unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        // Get the Nth usable frame and increment the counter.
-        // nth() consumes elements from the iterator — but we recreate the
-        // iterator each time, so `self.next` acts as our skip counter.
-        let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+        let mut bitmap = BITMAP.lock();
+
+        // Scan the bitmap starting from next_scan, wrapping around.
+        // Uses trailing_ones() to find the first 0 bit in each u64 word.
+        // trailing_ones() counts how many consecutive 1-bits there are from
+        // the least-significant bit. If the word is all 1s, it returns 64.
+        for i in 0..BITMAP_WORDS {
+            let word_idx = (self.next_scan / 64 + i) % BITMAP_WORDS;
+            let word = bitmap[word_idx];
+
+            if word == !0u64 {
+                continue; // All 64 frames in this word are used
+            }
+
+            // Found a word with at least one free bit
+            let bit = word.trailing_ones() as usize; // Index of first 0 bit
+            let frame_idx = word_idx * 64 + bit;
+
+            if frame_idx >= MAX_FRAMES {
+                continue; // Past the end of tracked memory
+            }
+
+            // Mark as used (set bit to 1)
+            bitmap[word_idx] |= 1u64 << bit;
+
+            // Advance scan position for next allocation
+            self.next_scan = frame_idx + 1;
+            if self.next_scan >= MAX_FRAMES {
+                self.next_scan = 0;
+            }
+
+            let addr = PhysAddr::new((frame_idx * FRAME_SIZE) as u64);
+            return Some(PhysFrame::containing_address(addr));
+        }
+
+        None // All frames are in use
     }
 }

@@ -30,7 +30,8 @@ const STACK_SIZE: usize = 4096 * 4; // 16KB
 pub enum ProcessState {
     Ready,      // Can be scheduled — waiting for CPU time
     Running,    // Currently executing on the CPU
-    Terminated, // Finished — will be cleaned up
+    Terminated, // Finished — will be reaped by scheduler next tick
+    Empty,      // Slot has been reaped — resources freed, available for reuse
 }
 
 // ── Process Struct ────────────────────────────────────────────────────
@@ -167,7 +168,18 @@ impl ProcessTable {
             ],
         };
 
-        self.processes.push(process);
+        // Try to reuse an Empty slot before extending the table.
+        // This prevents the process table from growing unboundedly when
+        // processes are spawned and exit repeatedly.
+        let empty_slot = self.processes.iter().position(|p| p.state == ProcessState::Empty);
+        match empty_slot {
+            Some(idx) => {
+                self.processes[idx] = process;
+            }
+            None => {
+                self.processes.push(process);
+            }
+        }
     }
 }
 

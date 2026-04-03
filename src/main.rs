@@ -26,7 +26,7 @@ use my_os::{println, serial_println};
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    use my_os::frame_allocator::BootInfoFrameAllocator;
+    use my_os::frame_allocator::BitmapFrameAllocator;
     use my_os::fs;
     use my_os::memory;
     use my_os::process::{self, ProcessState, PROCESS_TABLE};
@@ -40,7 +40,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    let mut frame_allocator = unsafe { BitmapFrameAllocator::init(&boot_info.memory_map) };
 
     my_os::heap::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");

@@ -78,20 +78,62 @@ impl LinkedListAllocator {
         }
     }
 
-    // Add a free region to the front of the free list.
+    // Add a free region to the free list, merging with adjacent regions.
+    //
+    // This is the key improvement over the original: when a block is freed,
+    // we check if it's adjacent to any existing free block. If so, we merge
+    // them into one larger block. This prevents external fragmentation where
+    // many small free blocks can't satisfy a large allocation even though
+    // the total free space is sufficient.
+    //
+    // Algorithm:
+    //   1. Walk the list and remove any regions adjacent to the new one
+    //   2. Combine their sizes with the new region
+    //   3. Insert the merged region at the front
     //
     // SAFETY: The caller must ensure that the memory region at [addr, addr+size)
     // is unused and large enough to hold a ListNode.
     unsafe fn add_free_region(&mut self, addr: usize, size: usize) {
-        // Ensure the freed region can hold a ListNode
         assert!(align_up(addr, mem::align_of::<ListNode>()) == addr);
         assert!(size >= mem::size_of::<ListNode>());
 
-        // Write a new ListNode at the start of the freed region.
-        // The node IS the free region — it's stored inside the free space.
-        let mut node = ListNode::new(size);
+        let mut new_start = addr;
+        let mut new_size = size;
+
+        // Walk the free list and absorb any adjacent regions.
+        // "Adjacent" means the existing region's end == our start, or
+        // our end == the existing region's start.
+        let mut current = &mut self.head;
+        while current.next.is_some() {
+            let region = current.next.as_ref().unwrap();
+            let region_start = region.start_addr();
+            let region_end = region.end_addr();
+            let region_size = region.size;
+
+            if region_end == new_start {
+                // Region is directly BEFORE us — absorb it into our block.
+                // Our new block starts where the old region started.
+                new_start = region_start;
+                new_size += region_size;
+                // Remove the absorbed region from the list
+                current.next = current.next.as_mut().unwrap().next.take();
+                // Don't advance current — check the new next for further merges
+            } else if new_start + new_size == region_start {
+                // Region is directly AFTER us — absorb it into our block.
+                // Our block grows to include the old region's space.
+                new_size += region_size;
+                // Remove the absorbed region from the list
+                current.next = current.next.as_mut().unwrap().next.take();
+            } else {
+                // Not adjacent — move to next node
+                current = current.next.as_mut().unwrap();
+            }
+        }
+
+        // Insert the (possibly merged) region at the front of the list.
+        let mut node = ListNode::new(new_size);
         node.next = self.head.next.take();
-        let node_ptr = addr as *mut ListNode;
+        let node_ptr = new_start as *mut ListNode;
         unsafe {
             node_ptr.write(node);
             self.head.next = Some(&mut *node_ptr);
