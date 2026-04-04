@@ -58,14 +58,21 @@ impl RingBuffer {
 static KEYBOARD_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
 
 // Called by the keyboard interrupt handler to push a character.
-// Logs a warning to serial if the buffer is full and input is dropped.
+// After pushing, wakes any process blocked on stdin so it can read
+// the new data. Logs a warning to serial if the buffer is full.
 pub fn push_char(c: u8) {
     if !KEYBOARD_BUFFER.lock().push(c) {
         // Buffer is full. Log to serial (not VGA — we're in an interrupt handler
         // and don't want to contend for the VGA lock). This tells the developer
         // that input is being lost, rather than failing silently.
         crate::serial_println!("WARNING: keyboard buffer full, dropped '{}'", c as char);
+        return;
     }
+
+    // Wake any process that's blocked waiting for keyboard input.
+    // This moves them from Blocked(Stdin) → Ready so the scheduler
+    // will pick them up on the next tick.
+    crate::process::wake_blocked(crate::process::WaitReason::Stdin);
 }
 
 // Called by the shell (or any consumer) to read a character.
@@ -75,16 +82,23 @@ pub fn pop_char() -> Option<u8> {
 }
 
 // Blocking read: waits until a character is available.
-// Uses hlt to sleep between checks (saves CPU).
-// The timer interrupt wakes us from hlt, and we check again.
+//
+// Instead of hlt-polling (which wastes scheduler cycles visiting us
+// every tick just to find we have nothing to do), we use proper blocking:
+//   1. Check the buffer — if a character is available, return it
+//   2. If empty, mark ourselves as Blocked(Stdin) and halt
+//   3. The scheduler SKIPS blocked processes — zero overhead
+//   4. When a key is pressed, the keyboard ISR calls wake_blocked(Stdin)
+//   5. We become Ready, the scheduler switches to us, we re-check the buffer
+//
+// This is how real OSes handle I/O waits: the process sleeps until the
+// hardware event arrives, rather than being woken every 55ms to poll.
 pub fn read_char() -> u8 {
     loop {
         if let Some(c) = pop_char() {
             return c;
         }
-        // No character available — halt until next interrupt.
-        // The keyboard interrupt will push a char, and the timer
-        // interrupt will wake us from hlt so we can check again.
-        x86_64::instructions::hlt();
+        // No character available — block until the keyboard ISR wakes us.
+        crate::process::block_current(crate::process::WaitReason::Stdin);
     }
 }

@@ -60,12 +60,24 @@ pub struct StackRegion {
 
 // ── Process States ────────────────────────────────────────────────────
 
+// ── Wait Reasons ─────────────────────────────────────────────────────
+//
+// When a process blocks, we record WHY it's blocked. This lets the
+// wakeup code be targeted: a keyboard interrupt only wakes processes
+// blocked on stdin, not processes blocked on (future) disk I/O or sleep.
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WaitReason {
+    Stdin, // Waiting for keyboard input
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
-    Ready,      // Can be scheduled — waiting for CPU time
-    Running,    // Currently executing on the CPU
-    Terminated, // Finished — will be reaped by scheduler next tick
-    Empty,      // Slot has been reaped — resources freed, available for reuse
+    Ready,                    // Can be scheduled — waiting for CPU time
+    Running,                  // Currently executing on the CPU
+    Blocked(WaitReason),      // Waiting for an event — scheduler skips it
+    Terminated,               // Finished — will be reaped by scheduler next tick
+    Empty,                    // Slot has been reaped — resources freed, available for reuse
 }
 
 // ── Process Struct ────────────────────────────────────────────────────
@@ -305,5 +317,70 @@ pub fn exit() {
     // We'll never be scheduled again because state = Terminated.
     loop {
         x86_64::instructions::hlt();
+    }
+}
+
+// ── Blocking / Wakeup ────────────────────────────────────────────────
+//
+// These functions implement real blocking semantics. When a process needs
+// to wait for an event (like keyboard input), it marks itself as Blocked
+// instead of busy-waiting in a hlt loop.
+//
+// The difference matters for the scheduler:
+//   - hlt-polling: scheduler switches to this process every tick, process
+//     immediately halts again → wasted context switch (~55ms of nothing)
+//   - Blocked: scheduler SKIPS this process entirely → zero overhead until
+//     the event actually arrives and wake_blocked() is called
+
+// Mark the current process as Blocked and wait for wakeup.
+// The caller specifies WHY we're blocking, so the wakeup code can be
+// targeted (e.g., only wake stdin-waiters on keyboard interrupt).
+//
+// After marking as Blocked, we enable interrupts and hlt-loop.
+// The scheduler will skip us. When the event arrives (e.g., keyboard IRQ),
+// the ISR calls wake_blocked() to move us back to Ready. The next
+// scheduler tick will then pick us up.
+pub fn block_current(reason: WaitReason) {
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let current = table.current;
+        table.processes[current].state = ProcessState::Blocked(reason);
+    } // Lock released before hlt
+
+    // Enable interrupts and halt until woken. The keyboard ISR (or timer)
+    // will fire, and wake_blocked() will set us back to Ready.
+    // The scheduler will then context-switch to us on its next pass.
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+
+        // After wakeup, check if we're no longer Blocked (= woken up).
+        // If still Blocked, another interrupt woke us (e.g., timer) but
+        // our event hasn't arrived yet — go back to sleep.
+        let still_blocked = {
+            let table = PROCESS_TABLE.lock();
+            let current = table.current;
+            matches!(table.processes[current].state, ProcessState::Blocked(_))
+        };
+
+        if !still_blocked {
+            break; // We've been woken — return to caller
+        }
+    }
+}
+
+// Wake all processes blocked on the given reason.
+// Called from interrupt handlers (e.g., keyboard ISR calls this with
+// WaitReason::Stdin when a key is pressed).
+//
+// Uses try_lock because this runs in interrupt context — if the process
+// table is already locked (e.g., by spawn()), we skip wakeup this time.
+// The next keyboard interrupt will try again.
+pub fn wake_blocked(reason: WaitReason) {
+    if let Some(mut table) = PROCESS_TABLE.try_lock() {
+        for process in table.processes.iter_mut() {
+            if process.state == ProcessState::Blocked(reason) {
+                process.state = ProcessState::Ready;
+            }
+        }
     }
 }

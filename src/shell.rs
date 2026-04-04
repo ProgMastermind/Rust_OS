@@ -11,7 +11,6 @@
 //   5. Repeat
 
 use crate::fs::FileSystem;
-use crate::keyboard;
 use crate::syscall;
 use crate::{print, println};
 
@@ -45,17 +44,46 @@ pub fn shell_main() {
     }
 }
 
-// Read a line of input from the keyboard buffer.
+// Read a single character from stdin using the syscall interface.
+//
+// This is the shell's I/O path:
+//   1. Call sys_read(fd=0) — non-blocking, returns available bytes or 0
+//   2. If 0 bytes returned, block until keyboard input arrives
+//   3. On wakeup, retry sys_read
+//
+// The blocking is done through process::block_current(Stdin), which
+// marks the process as Blocked and lets the scheduler skip it. The
+// keyboard ISR wakes us when a key is pressed. This is how real OSes
+// handle I/O: the process sleeps until the hardware event, rather
+// than being polled every timer tick.
+fn read_stdin_char() -> u8 {
+    let mut byte = [0u8; 1];
+    loop {
+        let result = syscall::syscall(
+            syscall::SYS_READ,
+            0, // fd 0 = stdin
+            byte.as_mut_ptr() as u64,
+            1,
+        );
+        if result > 0 {
+            return byte[0];
+        }
+        // No data available — block until keyboard ISR wakes us.
+        crate::process::block_current(crate::process::WaitReason::Stdin);
+    }
+}
+
+// Read a line of input from stdin via syscall.
 // Echoes characters as they're typed. Handles backspace.
 // Returns the number of bytes in the line (not including newline).
 fn read_line(buf: &mut [u8]) -> usize {
     let mut pos = 0;
 
     loop {
-        let c = keyboard::read_char();
+        let c = read_stdin_char();
 
         match c {
-            b'\n' => {
+            b'\n' => {          
                 println!();
                 return pos;
             }

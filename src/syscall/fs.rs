@@ -71,8 +71,26 @@ pub fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
 
     match fd {
         0 => {
-            // stdin — keyboard input. Not yet implemented.
-            0
+            // stdin — read from the keyboard buffer (non-blocking).
+            // Returns however many bytes are currently available (up to len).
+            // Returns 0 if no data is available — the caller is responsible
+            // for blocking and retrying if it wants to wait for input.
+            //
+            // We don't block inside the syscall handler because we're in
+            // interrupt context (int 0x80, IF=0). Blocking here would
+            // prevent the timer and keyboard interrupts from firing.
+            // Instead, the shell uses keyboard::read_char() which calls
+            // block_current(Stdin) between sys_read attempts.
+            let mut bytes_read = 0usize;
+            for byte in buf.iter_mut() {
+                if let Some(c) = crate::keyboard::pop_char() {
+                    *byte = c;
+                    bytes_read += 1;
+                } else {
+                    break; // Buffer empty — return what we have so far
+                }
+            }
+            bytes_read as i64
         }
         1 | 2 => EBADF, // Can't read from stdout or stderr
         _ => {
