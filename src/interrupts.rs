@@ -146,8 +146,41 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     use x86_64::registers::control::Cr2;
 
+    let fault_addr = Cr2::read();
+
+    // Check if the faulting address is a stack guard page.
+    // Guard pages are unmapped pages placed below each process's stack.
+    // If the stack overflows, it grows into the guard page, triggering
+    // this page fault. Without guard pages, the overflow would silently
+    // corrupt adjacent memory — much harder to debug.
+    if crate::process::is_guard_page(fault_addr.as_u64()) {
+        // Try to identify which process overflowed.
+        // Use try_lock because we might be in an interrupt that preempted
+        // code holding the process table lock.
+        let pid_info = crate::process::PROCESS_TABLE
+            .try_lock()
+            .and_then(|table| {
+                let current = table.current;
+                table.processes.get(current).map(|p| p.pid)
+            });
+
+        if let Some(pid) = pid_info {
+            panic!(
+                "KERNEL STACK OVERFLOW in process PID {}\n\
+                 Guard page hit at {:?}\n{:#?}",
+                pid, fault_addr, stack_frame
+            );
+        } else {
+            panic!(
+                "KERNEL STACK OVERFLOW\n\
+                 Guard page hit at {:?}\n{:#?}",
+                fault_addr, stack_frame
+            );
+        }
+    }
+
     println!("EXCEPTION: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
+    println!("Accessed Address: {:?}", fault_addr);
     println!("Error Code: {:?}", error_code);
     println!("{:#?}", stack_frame);
 

@@ -105,3 +105,35 @@ pub fn align_up(addr: usize, align: usize) -> usize {
     //   (addr + align - 1) & !(align - 1)
     (addr + align - 1) & !(align - 1)
 }
+
+// ── Unit Tests ──────────────────────────────────────────────────────
+//
+// These tests run via `cargo test` on the lib.rs test binary.
+// They don't need the heap — just pure arithmetic.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_align_up_basic() {
+        assert_eq!(align_up(0, 4), 0);     // 0 is aligned to everything
+        assert_eq!(align_up(1, 4), 4);     // round 1 up to 4
+        assert_eq!(align_up(3, 4), 4);     // round 3 up to 4
+        assert_eq!(align_up(4, 4), 4);     // already aligned — no change
+        assert_eq!(align_up(5, 4), 8);     // round 5 up to 8
+        assert_eq!(align_up(7, 8), 8);     // round 7 up to 8
+        assert_eq!(align_up(8, 8), 8);     // already aligned
+        assert_eq!(align_up(9, 8), 16);    // round 9 up to 16
+    }
+
+    #[test_case]
+    fn test_align_up_powers_of_two() {
+        // Common allocator alignment values
+        assert_eq!(align_up(0x1001, 8), 0x1008);
+        assert_eq!(align_up(0x1000, 4096), 0x1000); // page-aligned stays
+        assert_eq!(align_up(0x1001, 4096), 0x2000); // rounds up to next page
+        assert_eq!(align_up(1, 1), 1);               // align=1 is identity
+        assert_eq!(align_up(42, 1), 42);             // align=1 never changes
+    }
+}

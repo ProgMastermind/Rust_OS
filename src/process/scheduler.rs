@@ -47,9 +47,11 @@ pub fn schedule() {
             continue; // Don't reap ourselves
         }
         if table.processes[i].state == ProcessState::Terminated {
-            // Free the process's resources
-            table.processes[i]._stack = Vec::new();     // Drop the 16KB stack
-            table.processes[i].fd_table = Vec::new();   // Drop fd table
+            // Free per-process resources. The stack pages (mapped memory)
+            // are intentionally NOT unmapped here — we're in interrupt
+            // context and can't safely lock the mapper. spawn() will
+            // unmap the old pages when this slot is reused.
+            table.processes[i].fd_table = Vec::new();
             table.processes[i].entry_fn = None;
             table.processes[i].state = ProcessState::Empty;
             crate::serial_println!(

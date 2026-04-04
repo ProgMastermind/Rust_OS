@@ -23,9 +23,14 @@
 // This lets us access any physical address by adding the offset. We need this
 // to read/write page table entries (which contain physical addresses).
 
+use spin::Mutex;
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{OffsetPageTable, PageTable};
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, Size4KiB,
+};
 use x86_64::VirtAddr;
+
+use crate::frame_allocator::BitmapFrameAllocator;
 
 // Initialize an OffsetPageTable.
 //
@@ -66,4 +71,64 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut
     let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
 
     unsafe { &mut *page_table_ptr }
+}
+
+// ── Global Mapper and Frame Allocator ────────────────────────────────
+//
+// After kernel_main initializes the mapper and frame allocator (and uses
+// them to set up the heap), it stores them here so other kernel code
+// (like spawn()) can allocate and map pages without threading references.
+//
+// Option<> because they start as None — only valid after store_globals().
+
+static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
+static FRAME_ALLOC: Mutex<Option<BitmapFrameAllocator>> = Mutex::new(None);
+
+/// Store the mapper and frame allocator for global access.
+/// Called once from kernel_main after heap initialization.
+pub fn store_globals(mapper: OffsetPageTable<'static>, frame_allocator: BitmapFrameAllocator) {
+    *MAPPER.lock() = Some(mapper);
+    *FRAME_ALLOC.lock() = Some(frame_allocator);
+}
+
+/// Map `count` consecutive virtual pages to freshly allocated physical frames.
+/// The guard page (if any) is the caller's responsibility to leave unmapped.
+///
+/// Returns Err if frame allocation or page mapping fails.
+pub fn map_pages(start_page: Page<Size4KiB>, count: usize) -> Result<(), &'static str> {
+    let mut mapper_guard = MAPPER.lock();
+    let mut fa_guard = FRAME_ALLOC.lock();
+    let mapper = mapper_guard.as_mut().ok_or("mapper not initialized")?;
+    let fa = fa_guard.as_mut().ok_or("frame allocator not initialized")?;
+
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+    for i in 0..count {
+        let page = Page::containing_address(start_page.start_address() + (i as u64) * 4096);
+        let frame = fa.allocate_frame().ok_or("out of physical frames")?;
+        unsafe {
+            mapper
+                .map_to(page, frame, flags, fa)
+                .map_err(|_| "map_to failed")?
+                .flush();
+        }
+    }
+    Ok(())
+}
+
+/// Unmap `count` consecutive virtual pages and return their physical frames
+/// to the frame allocator. Silently skips pages that aren't mapped.
+pub fn unmap_pages(start_page: Page<Size4KiB>, count: usize) {
+    let mut mapper_guard = MAPPER.lock();
+    let mut fa_guard = FRAME_ALLOC.lock();
+    if let (Some(mapper), Some(fa)) = (mapper_guard.as_mut(), fa_guard.as_mut()) {
+        for i in 0..count {
+            let page =
+                Page::containing_address(start_page.start_address() + (i as u64) * 4096);
+            if let Ok((frame, flush)) = mapper.unmap(page) {
+                flush.flush();
+                fa.deallocate_frame(frame);
+            }
+        }
+    }
 }

@@ -46,6 +46,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         .expect("heap initialization failed");
     serial_println!("Heap initialized");
 
+    // Store mapper and frame allocator globally so spawn() can map
+    // process stacks with guard pages. After this, all page mapping
+    // goes through the global accessors in memory.rs.
+    memory::store_globals(mapper, frame_allocator);
+
     // ── Process Setup ───────────────────────────────────────────────
 
     println!("Booting my_os...");
@@ -53,13 +58,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     {
         let mut table = PROCESS_TABLE.lock();
 
-        // Register kernel_main as process 0 (idle process)
+        // Register kernel_main as process 0 (idle process).
+        // stack_region is None because the idle process uses the kernel
+        // boot stack (set up by the bootloader), not a mapped stack.
         table.processes.push(process::Process {
             pid: 0,
             state: ProcessState::Running,
             stack_pointer: 0,
             entry_fn: None,
-            _stack: alloc::vec::Vec::new(),
+            stack_region: None,
             fd_table: alloc::vec![
                 Some(fs::FdEntry::Stdin),  // fd 0
                 Some(fs::FdEntry::Stdout), // fd 1
@@ -69,7 +76,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         table.next_pid = 1;
         table.current = 0;
 
-        // Spawn the shell as process 1
+        // Spawn the shell as process 1.
+        // spawn() maps 4 stack pages at a dedicated virtual address
+        // with an unmapped guard page below for stack overflow detection.
         table.spawn(my_os::shell::shell_main);
         serial_println!("Shell spawned as PID 1");
     }

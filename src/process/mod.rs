@@ -2,7 +2,7 @@
 //
 // A "process" in our kernel is:
 //   - A saved stack pointer (RSP) pointing to saved registers on the stack
-//   - A kernel stack (heap-allocated memory for this process's stack)
+//   - A kernel stack mapped at a dedicated virtual address with a guard page
 //   - A state (Ready, Running, Terminated)
 //   - A unique PID
 //   - The entry function to execute (stored directly in the PCB)
@@ -18,11 +18,45 @@ pub mod scheduler;
 
 use alloc::vec::Vec;
 use spin::Mutex;
+use x86_64::structures::paging::{Page, Size4KiB};
+use x86_64::VirtAddr;
 
-// Size of each process's kernel stack: 16KB.
-// This is where the process's local variables, function call frames,
-// and saved registers live.
-const STACK_SIZE: usize = 4096 * 4; // 16KB
+// ── Stack Layout with Guard Page ─────────────────────────────────────
+//
+// Each process's stack is mapped at a dedicated virtual address range,
+// with an UNMAPPED guard page below it. If the stack overflows (grows
+// past the bottom of the mapped region), the CPU writes into the guard
+// page → page fault → clean "STACK OVERFLOW" message.
+//
+// Without a guard page, stack overflow silently corrupts whatever memory
+// happens to be adjacent — an extremely hard bug to track down.
+//
+// Per-process virtual address layout (each "slot"):
+//   [Guard page (4KB, NOT mapped)] [Stack (16KB, mapped R/W)]
+//   ^                               ^                         ^
+//   guard_page_addr                 stack_bottom               stack_top
+//
+// Slot N starts at STACK_REGION_BASE + N * PAGES_PER_SLOT * 4096.
+
+const STACK_PAGES: usize = 4;       // 4 pages = 16KB per process stack
+const GUARD_PAGES: usize = 1;       // 1 unmapped page below each stack
+const PAGES_PER_SLOT: usize = STACK_PAGES + GUARD_PAGES; // 5 pages total
+
+// Virtual address base for all process stacks.
+// Chosen to not collide with heap (0x4444_4444_0000) or kernel code.
+const STACK_REGION_BASE: u64 = 0x5555_0000_0000;
+
+// ── Stack Region ─────────────────────────────────────────────────────
+//
+// Tracks the virtual address range of a process's stack and its guard page.
+// Used for cleanup (unmapping pages when the slot is reused) and for
+// detecting stack overflow in the page fault handler.
+
+pub struct StackRegion {
+    pub guard_page_addr: u64, // Virtual address of the unmapped guard page
+    pub stack_bottom: u64,    // First byte of the mapped stack
+    pub stack_top: u64,       // One past the last byte of the mapped stack
+}
 
 // ── Process States ────────────────────────────────────────────────────
 
@@ -51,10 +85,12 @@ pub struct Process {
     // so process_entry can read it without a separate global registry.
     // None for the idle process (kernel_main), which doesn't need one.
     pub entry_fn: Option<fn()>,
-    // The actual stack memory. We heap-allocate it as a Vec<u8>.
-    // The process's RSP points somewhere inside this Vec.
-    // We keep ownership here so the stack isn't freed while in use.
-    pub _stack: Vec<u8>,
+    // The stack region for this process. Contains the guard page address
+    // and the mapped stack range. None for the idle process (which uses
+    // the kernel boot stack set up by the bootloader).
+    // When the process is reaped, stack_region stays Some until spawn()
+    // reuses the slot and unmaps the old pages.
+    pub stack_region: Option<StackRegion>,
     // Per-process file descriptor table (Session 6).
     // Index = fd number. Entry = what that fd points to.
     //   fd 0 = Stdin, fd 1 = Stdout, fd 2 = Stderr
@@ -85,10 +121,9 @@ pub static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::new(ProcessTable {
 impl ProcessTable {
     // Spawn a new process that will execute `entry_point`.
     //
-    // The entry_point function pointer is stored directly in the Process
-    // struct (PCB). When this process is first scheduled, context_switch
-    // jumps to process_entry(), which reads entry_fn from the PCB and
-    // calls it. No separate registry needed.
+    // The stack is mapped at a dedicated virtual address with a guard page
+    // below it. The guard page is intentionally NOT mapped — any access
+    // to it causes a page fault that we catch and report as stack overflow.
     //
     // Stack alignment (System V ABI requirement):
     //   The x86_64 ABI requires that at function entry, RSP ≡ 8 (mod 16).
@@ -100,7 +135,7 @@ impl ProcessTable {
     //   ret to be ≡ 8 (mod 16) for process_entry to have correct alignment.
     //
     //   Trace through the math:
-    //     stack_top is 16-aligned (0 mod 16)
+    //     stack_top is page-aligned (0 mod 16, since 4096 is a multiple of 16)
     //     We place 8 values (64 bytes) below it:
     //       [r15] [r14] [r13] [r12] [rbx] [rbp] [ret_addr] [padding]
     //     frame_start = stack_top - 64 = 0 mod 16
@@ -118,20 +153,48 @@ impl ProcessTable {
         let pid = self.next_pid;
         self.next_pid += 1;
 
-        // Allocate a stack for this process (zeroed out).
-        // Vec<u8> may not be 16-byte aligned, so we align stack_top manually.
-        let stack = alloc::vec![0u8; STACK_SIZE];
+        // Find slot: reuse an Empty slot or append a new entry.
+        let slot_idx = self
+            .processes
+            .iter()
+            .position(|p| p.state == ProcessState::Empty)
+            .unwrap_or(self.processes.len());
 
-        // stack_top = highest usable address, aligned DOWN to 16 bytes.
-        // The & !0xF mask clears the bottom 4 bits, giving a multiple of 16.
-        let stack_end = stack.as_ptr() as usize + STACK_SIZE;
-        let stack_top = stack_end & !0xF; // 16-byte aligned
+        // If reusing a slot that still has mapped stack pages, unmap them first.
+        // This frees the physical frames back to the frame allocator.
+        if slot_idx < self.processes.len() {
+            if let Some(ref region) = self.processes[slot_idx].stack_region {
+                let start_page =
+                    Page::<Size4KiB>::containing_address(VirtAddr::new(region.stack_bottom));
+                crate::memory::unmap_pages(start_page, STACK_PAGES);
+            }
+        }
+
+        // Calculate the virtual address region for this slot's stack.
+        // Guard page = first page (unmapped), stack = next STACK_PAGES pages (mapped).
+        let region_base =
+            STACK_REGION_BASE + (slot_idx as u64) * (PAGES_PER_SLOT as u64) * 4096;
+        let guard_page_addr = region_base;
+        let stack_bottom = region_base + (GUARD_PAGES as u64) * 4096;
+        let stack_top = stack_bottom + (STACK_PAGES as u64) * 4096;
+
+        // Map the stack pages. The guard page is deliberately NOT mapped —
+        // that's the whole point. Any write to it triggers a page fault.
+        let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack_bottom));
+        crate::memory::map_pages(start_page, STACK_PAGES)
+            .expect("failed to map process stack pages");
+
+        // Zero out the stack memory (fresh frames may contain stale data).
+        unsafe {
+            core::ptr::write_bytes(stack_bottom as *mut u8, 0, STACK_PAGES * 4096);
+        }
+
+        // stack_top is page-aligned (4096 * N), which is also 16-aligned.
+        // The & !0xF is technically a no-op here but kept for clarity.
+        let aligned_stack_top = (stack_top as usize) & !0xF;
 
         // 8 values × 8 bytes = 64 bytes below stack_top.
-        // The 8th slot is padding to fix alignment:
-        //   After 6 pops: RSP = stack_top - 16
-        //   After ret:    RSP = stack_top - 8 = 8 mod 16 ✓ (ABI correct)
-        let frame_start = stack_top - 64;
+        let frame_start = aligned_stack_top - 64;
 
         // Build the initial stack frame.
         // The first 6 entries are callee-saved registers (all zero for fresh process).
@@ -154,13 +217,18 @@ impl ProcessTable {
             dest.write(frame);
         }
 
+        let stack_region = StackRegion {
+            guard_page_addr,
+            stack_bottom,
+            stack_top,
+        };
+
         let process = Process {
             pid,
             state: ProcessState::Ready,
             stack_pointer: frame_start as u64,
-            entry_fn: Some(entry_point), // Stored in the PCB — no global registry
-            _stack: stack,
-            // Every process gets stdin/stdout/stderr by default
+            entry_fn: Some(entry_point),
+            stack_region: Some(stack_region),
             fd_table: alloc::vec![
                 Some(crate::fs::FdEntry::Stdin),  // fd 0
                 Some(crate::fs::FdEntry::Stdout), // fd 1
@@ -168,19 +236,30 @@ impl ProcessTable {
             ],
         };
 
-        // Try to reuse an Empty slot before extending the table.
-        // This prevents the process table from growing unboundedly when
-        // processes are spawned and exit repeatedly.
-        let empty_slot = self.processes.iter().position(|p| p.state == ProcessState::Empty);
-        match empty_slot {
-            Some(idx) => {
-                self.processes[idx] = process;
-            }
-            None => {
-                self.processes.push(process);
-            }
+        if slot_idx < self.processes.len() {
+            self.processes[slot_idx] = process;
+        } else {
+            self.processes.push(process);
         }
     }
+}
+
+// ── Guard Page Detection ─────────────────────────────────────────────
+//
+// Called by the page fault handler to check if the faulting address
+// is a stack guard page. Each process slot has a guard page at the
+// first page of its region. If the address falls in any guard page,
+// we know it's a stack overflow.
+
+pub fn is_guard_page(addr: u64) -> bool {
+    if addr < STACK_REGION_BASE {
+        return false;
+    }
+    let offset = addr - STACK_REGION_BASE;
+    let slot_size = (PAGES_PER_SLOT as u64) * 4096;
+    let within_slot = offset % slot_size;
+    // The first page (bytes 0..4095) of each slot is the guard page
+    within_slot < 4096
 }
 
 // ── Process Entry Wrapper ─────────────────────────────────────────────

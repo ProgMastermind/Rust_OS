@@ -87,3 +87,79 @@ fn many_boxes_long_lived() {
     }
     assert_eq!(*long_lived, 1);
 }
+
+// ── Edge-case tests (Stage 3, Fix #8) ──────────────────────────────
+
+// Test: allocations with various alignments return properly aligned pointers.
+// The allocator must respect the alignment requested by each Layout.
+// If alignment is broken, data structures like AtomicU64 (8-byte aligned)
+// would cause hardware faults or silent data corruption on some architectures.
+#[test_case]
+fn aligned_allocations() {
+    use core::alloc::Layout;
+
+    for &align in &[1, 2, 4, 8, 16, 32, 64, 128, 256] {
+        let layout = Layout::from_size_align(align, align).unwrap();
+        let ptr = unsafe { alloc::alloc::alloc(layout) };
+        assert!(!ptr.is_null(), "allocation failed for align={}", align);
+        assert_eq!(
+            ptr as usize % align,
+            0,
+            "misaligned: ptr={:p} expected align={}",
+            ptr,
+            align,
+        );
+        unsafe { alloc::alloc::dealloc(ptr, layout) };
+    }
+}
+
+// Test: alloc and dealloc in different orders (LIFO, FIFO, interleaved).
+// A correct allocator must handle any deallocation order — not just the
+// reverse of allocation order. The linked-list allocator with coalescing
+// (Stage 2) should merge adjacent freed blocks regardless of free order.
+#[test_case]
+fn alloc_dealloc_patterns() {
+    // LIFO (stack-like): A, B, C allocated, then freed C, B, A
+    let a = Box::new([1u8; 64]);
+    let b = Box::new([2u8; 128]);
+    let c = Box::new([3u8; 256]);
+    assert_eq!(a[0], 1);
+    assert_eq!(b[0], 2);
+    assert_eq!(c[0], 3);
+    drop(c);
+    drop(b);
+    drop(a);
+
+    // FIFO: A, B, C allocated, freed in same order A, B, C
+    let a = Box::new([4u8; 64]);
+    let b = Box::new([5u8; 128]);
+    let c = Box::new([6u8; 256]);
+    drop(a);
+    drop(b);
+    drop(c);
+
+    // Interleaved: alloc A, alloc B, free A, alloc C, free C, free B
+    let a = Box::new([7u8; 32]);
+    let b = Box::new([8u8; 64]);
+    drop(a);
+    let c = Box::new([9u8; 48]);
+    drop(c);
+    drop(b);
+}
+
+// Test: large allocation close to heap capacity.
+// Verifies the allocator can hand out a big contiguous block, and that
+// freeing it returns the memory so another large allocation can succeed.
+// This would fail with a bump allocator (no dealloc) or a fragmented heap.
+#[test_case]
+fn large_allocation() {
+    // 50KB out of 100KB heap
+    let large = Box::new([0xABu8; 50 * 1024]);
+    assert_eq!(large[0], 0xAB);
+    assert_eq!(large[50 * 1024 - 1], 0xAB);
+    drop(large);
+
+    // After freeing, the same amount should be allocatable again
+    let another = Box::new([0xCDu8; 50 * 1024]);
+    assert_eq!(another[0], 0xCD);
+}
