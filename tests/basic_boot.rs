@@ -1,7 +1,4 @@
-// Integration test: basic boot
-//
-// Verifies that the kernel boots successfully and println! works.
-// This runs as a completely separate binary in QEMU.
+// Integration test: kernel boots and println works.
 
 #![no_std]
 #![no_main]

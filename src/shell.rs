@@ -1,14 +1,4 @@
-// Interactive Shell
-//
-// A kernel process that reads keyboard input and executes commands.
-// This is the primary user interface of our OS.
-//
-// The shell loop:
-//   1. Print prompt "my_os> "
-//   2. Read characters from keyboard buffer until Enter
-//   3. Parse the line into command + arguments
-//   4. Match command and execute
-//   5. Repeat
+// Interactive shell. Reads stdin via syscall, executes built-in commands.
 
 use crate::fs::FileSystem;
 use crate::syscall;
@@ -44,38 +34,23 @@ pub fn shell_main() {
     }
 }
 
-// Read a single character from stdin using the syscall interface.
-//
-// This is the shell's I/O path:
-//   1. Call sys_read(fd=0) — non-blocking, returns available bytes or 0
-//   2. If 0 bytes returned, block until keyboard input arrives
-//   3. On wakeup, retry sys_read
-//
-// The blocking is done through process::block_current(Stdin), which
-// marks the process as Blocked and lets the scheduler skip it. The
-// keyboard ISR wakes us when a key is pressed. This is how real OSes
-// handle I/O: the process sleeps until the hardware event, rather
-// than being polled every timer tick.
+/// Read one byte from stdin. Blocks via Blocked(Stdin) if no data available.
 fn read_stdin_char() -> u8 {
     let mut byte = [0u8; 1];
     loop {
         let result = syscall::syscall(
             syscall::SYS_READ,
-            0, // fd 0 = stdin
+            0,
             byte.as_mut_ptr() as u64,
             1,
         );
         if result > 0 {
             return byte[0];
         }
-        // No data available — block until keyboard ISR wakes us.
         crate::process::block_current(crate::process::WaitReason::Stdin);
     }
 }
 
-// Read a line of input from stdin via syscall.
-// Echoes characters as they're typed. Handles backspace.
-// Returns the number of bytes in the line (not including newline).
 fn read_line(buf: &mut [u8]) -> usize {
     let mut pos = 0;
 
@@ -83,28 +58,25 @@ fn read_line(buf: &mut [u8]) -> usize {
         let c = read_stdin_char();
 
         match c {
-            b'\n' => {          
+            b'\n' => {
                 println!();
                 return pos;
             }
-            // Backspace (0x08) or DEL (0x7F)
             0x08 | 0x7F => {
                 if pos > 0 {
                     pos -= 1;
                     print!("\x08 \x08");
                 }
             }
-            // Printable ASCII only — rejects control characters
+            // printable ASCII only
             0x20..=0x7E => {
                 if pos < buf.len() - 1 {
                     buf[pos] = c;
                     pos += 1;
                     print!("{}", c as char);
                 }
-                // If buffer is full, silently ignore further input
-                // (better than crashing — user can still press Enter)
             }
-            _ => {} // Ignore non-printable characters
+            _ => {}
         }
     }
 }
@@ -142,8 +114,6 @@ fn cmd_help() {
 }
 
 fn cmd_echo(args: &str) {
-    // Print the argument as-is. Since read_line only accepts printable
-    // ASCII (0x20..=0x7E), no control characters can reach here.
     println!("{}", args);
 }
 
@@ -166,7 +136,6 @@ fn cmd_cat(args: &str) {
         return;
     }
 
-    // Open the file via syscall
     let fd = syscall::syscall(
         syscall::SYS_OPEN,
         args.as_ptr() as u64,
@@ -174,7 +143,6 @@ fn cmd_cat(args: &str) {
         0,
     );
 
-    // Check for errors using specific error codes
     if fd < 0 {
         match fd {
             syscall::ENOENT => println!("cat: {}: No such file", args),
@@ -185,7 +153,6 @@ fn cmd_cat(args: &str) {
         return;
     }
 
-    // Read and print in chunks until EOF
     let mut buf = [0u8; 256];
     loop {
         let bytes_read = syscall::syscall(
@@ -196,19 +163,16 @@ fn cmd_cat(args: &str) {
         );
 
         if bytes_read < 0 {
-            // Read error — report it
             println!("cat: read error: {}", syscall::errno_name(bytes_read));
             break;
         }
-
         if bytes_read == 0 {
-            break; // EOF
+            break;
         }
 
-        // Write to stdout via syscall
         let write_result = syscall::syscall(
             syscall::SYS_WRITE,
-            1, // stdout
+            1,
             buf.as_ptr() as u64,
             bytes_read as u64,
         );
@@ -219,7 +183,6 @@ fn cmd_cat(args: &str) {
         }
     }
 
-    // Always close the file, even if reading failed
     let close_result = syscall::syscall(syscall::SYS_CLOSE, fd as u64, 0, 0);
     if close_result < 0 {
         crate::serial_println!("cat: warning: close failed: {}", syscall::errno_name(close_result));
