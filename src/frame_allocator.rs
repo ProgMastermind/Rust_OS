@@ -13,6 +13,7 @@ const BITMAP_WORDS: usize = MAX_FRAMES / 64;
 // All bits start as 1 (used). init() clears bits for usable regions.
 static BITMAP: Mutex<[u64; BITMAP_WORDS]> = Mutex::new([!0u64; BITMAP_WORDS]);
 
+/// Tracks free/used physical frames via a static bitmap. Must be initialized before the heap.
 pub struct BitmapFrameAllocator {
     next_scan: usize, // scan optimization hint
 }
@@ -38,6 +39,7 @@ impl BitmapFrameAllocator {
         BitmapFrameAllocator { next_scan: 0 }
     }
 
+    /// Return a frame to the pool. O(1) -- just clears the bit.
     pub fn deallocate_frame(&mut self, frame: PhysFrame) {
         let frame_idx = frame.start_address().as_u64() as usize / FRAME_SIZE;
         if frame_idx < MAX_FRAMES {
@@ -54,6 +56,7 @@ impl BitmapFrameAllocator {
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
+    /// Scan bitmap from next_scan for first free frame. O(n/64) worst case.
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         let mut bitmap = BITMAP.lock();
 

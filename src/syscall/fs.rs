@@ -5,6 +5,7 @@ use crate::fs::{FdEntry, FileSystem};
 use crate::process::PROCESS_TABLE;
 use super::{EBADF, EINVAL, ENOENT, EPERM, EROFS};
 
+/// Write to fd 1 (stdout/VGA), fd 2 (stderr/serial). Returns bytes written or error.
 pub fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> i64 {
     let buf = match unsafe { super::slice_from_user_ptr(buf_ptr, len) } {
         Ok(b) => b,
@@ -32,11 +33,12 @@ pub fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> i64 {
             }
             len as i64
         }
-        0 => EBADF,
-        _ => EROFS,
+        0 => EBADF, // can't write to stdin
+        _ => EROFS, // ramdisk files are read-only
     }
 }
 
+/// Read from fd 0 (stdin/keyboard, non-blocking) or file fds (ramdisk). Returns bytes read.
 pub fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
     let buf = match unsafe { super::slice_from_user_ptr_mut(buf_ptr, len) } {
         Ok(b) => b,
@@ -90,6 +92,7 @@ pub fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
     }
 }
 
+/// Open a file by path in the ramdisk. Returns new fd or ENOENT.
 pub fn sys_open(path_ptr: u64, path_len: u64) -> i64 {
     let path_bytes = match unsafe { super::slice_from_user_ptr(path_ptr, path_len) } {
         Ok(b) => b,
@@ -136,6 +139,7 @@ pub fn sys_open(path_ptr: u64, path_len: u64) -> i64 {
     }
 }
 
+/// Close a file fd. Stdin/stdout/stderr cannot be closed (EPERM).
 pub fn sys_close(fd: u64) -> i64 {
     let fd_idx = fd as usize;
 

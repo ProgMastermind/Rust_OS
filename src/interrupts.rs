@@ -7,6 +7,7 @@ use pic8259::ChainedPics;
 use spin;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
+// Remap PICs so IRQs 0-15 map to interrupts 32-47 (0-31 are reserved for CPU exceptions).
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
@@ -15,6 +16,7 @@ pub static PICS: spin::Mutex<ChainedPics> =
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
+/// Hardware IRQ numbers after PIC remapping (Timer=32, Keyboard=33).
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard,
@@ -44,7 +46,7 @@ lazy_static! {
 
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
-        idt[0x80].set_handler_fn(crate::syscall::syscall_handler);
+        idt[0x80].set_handler_fn(crate::syscall::syscall_handler); // software interrupt for syscalls
 
         idt
     };
@@ -54,10 +56,12 @@ pub fn init_idt() {
     IDT.load();
 }
 
+/// INT3. Non-fatal, execution continues after printing.
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
+/// Runs on a separate IST stack to survive kernel stack corruption.
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
@@ -65,6 +69,7 @@ extern "x86-interrupt" fn double_fault_handler(
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
+/// CR2 holds the faulting address. Checks for guard page hits (stack overflow).
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
@@ -105,8 +110,9 @@ extern "x86-interrupt" fn page_fault_handler(
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-pub static TICKS: AtomicU64 = AtomicU64::new(0);
+pub static TICKS: AtomicU64 = AtomicU64::new(0); // incremented ~18.2 times/sec
 
+/// PIT timer fires ~18.2Hz. Increments tick counter, sends EOI, then calls the scheduler.
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, Ordering::Relaxed);
 
@@ -119,6 +125,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     crate::process::scheduler::schedule();
 }
 
+/// Read scancode from port 0x60, decode to char, push into keyboard ring buffer.
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use x86_64::instructions::port::Port;

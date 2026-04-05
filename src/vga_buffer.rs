@@ -27,6 +27,7 @@ pub enum Color {
     White = 15,
 }
 
+/// Packed color byte: upper 4 bits = background, lower 4 = foreground.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 struct ColorCode(u8);
@@ -37,6 +38,7 @@ impl ColorCode {
     }
 }
 
+/// Single VGA character cell: one byte for the char, one for the color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 struct ScreenChar {
@@ -52,6 +54,7 @@ struct Buffer {
     chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
 
+/// Writes characters to the bottom row of the VGA buffer, scrolling up on newline.
 pub struct Writer {
     column_position: usize,
     color_code: ColorCode,
@@ -82,7 +85,7 @@ impl Writer {
         for byte in s.bytes() {
             match byte {
                 0x20..=0x7e | b'\n' => self.write_byte(byte),
-                _ => self.write_byte(0xfe),
+                _ => self.write_byte(0xfe), // VGA block character as placeholder for non-printable
             }
         }
     }
@@ -127,6 +130,7 @@ lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
+        // SAFETY: 0xB8000 is the VGA text buffer's fixed physical address.
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
     });
 }

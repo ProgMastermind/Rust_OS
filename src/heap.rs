@@ -5,9 +5,11 @@ use x86_64::structures::paging::{
 };
 use x86_64::VirtAddr;
 
-pub const HEAP_START: usize = 0x_4444_4444_0000;
+pub const HEAP_START: usize = 0x_4444_4444_0000; // arbitrary, avoids kernel code/stack/VGA regions
 pub const HEAP_SIZE: usize = 100 * 1024; // 100 KiB
 
+/// Map pages for the heap region and initialize the allocator.
+/// Must be called before any heap allocations (Box, Vec, String).
 pub fn init_heap(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,

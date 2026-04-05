@@ -8,13 +8,15 @@ use super::linked_list::LinkedListAllocator;
 
 const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
+// Free block node. Written into the freed block's memory (reuses the space).
 struct ListNode {
     next: Option<&'static mut ListNode>,
 }
 
+/// Primary kernel allocator. O(1) alloc/dealloc for sizes <= 2048 via per-size free lists.
 pub struct FixedSizeBlockAllocator {
-    list_heads: [Option<&'static mut ListNode>; BLOCK_SIZES.len()],
-    fallback_allocator: LinkedListAllocator,
+    list_heads: [Option<&'static mut ListNode>; BLOCK_SIZES.len()], // one free list per size
+    fallback_allocator: LinkedListAllocator, // for allocations > 2048 bytes
 }
 
 impl FixedSizeBlockAllocator {
@@ -30,6 +32,7 @@ impl FixedSizeBlockAllocator {
         self.fallback_allocator.init(heap_start, heap_size);
     }
 
+    /// Round up to the matching block size, pop from that free list. O(1) for common sizes.
     pub fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
         match list_index(&layout) {
             Some(index) => {
@@ -52,6 +55,7 @@ impl FixedSizeBlockAllocator {
         }
     }
 
+    /// Push the freed block onto the matching size's free list. O(1).
     pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
         match list_index(&layout) {
             Some(index) => {
@@ -73,6 +77,7 @@ impl FixedSizeBlockAllocator {
     }
 }
 
+/// Which block size list fits this layout? None if too large for any fixed list.
 fn list_index(layout: &Layout) -> Option<usize> {
     let required_block_size = layout.size().max(layout.align());
     BLOCK_SIZES.iter().position(|&s| s >= required_block_size)

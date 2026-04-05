@@ -2,6 +2,7 @@
 
 use crate::process::PROCESS_TABLE;
 
+/// Terminate the calling process. Scheduler will never run it again.
 pub fn sys_exit(code: u64) -> i64 {
     crate::serial_println!("Process exited with code {}", code);
 
@@ -17,6 +18,7 @@ pub fn sys_exit(code: u64) -> i64 {
     }
 }
 
+/// Return the PID of the calling process.
 pub fn sys_getpid() -> i64 {
     let table = PROCESS_TABLE.lock();
     let current = table.current;

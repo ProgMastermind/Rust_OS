@@ -32,6 +32,7 @@ impl<A> Locked<A> {
     }
 }
 
+// SAFETY: Locked<> provides mutual exclusion via spinlock.
 unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut allocator = self.lock();

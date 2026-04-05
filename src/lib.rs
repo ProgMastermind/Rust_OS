@@ -32,12 +32,14 @@ pub fn init() {
     unsafe { interrupts::PICS.lock().initialize() };
 }
 
+/// Separate from init() so interrupts stay off until heap/processes are ready.
 pub fn enable_interrupts() {
     x86_64::instructions::interrupts::enable();
 }
 
 // Test framework
 
+/// Wraps test functions to print name before running and [ok] after.
 pub trait Testable {
     fn run(&self);
 }
@@ -50,6 +52,7 @@ impl<T: Fn()> Testable for T {
     }
 }
 
+/// Run all #[test_case] functions, then exit QEMU with success.
 pub fn test_runner(tests: &[&dyn Testable]) {
     serial_println!("Running {} tests", tests.len());
     for test in tests {
@@ -58,6 +61,7 @@ pub fn test_runner(tests: &[&dyn Testable]) {
     exit_qemu(QemuExitCode::Success);
 }
 
+/// Panic handler for integration test binaries. Prints failure and exits QEMU.
 pub fn test_panic_handler(info: &PanicInfo) -> ! {
     serial_println!("[failed]\n");
     serial_println!("Error: {}\n", info);
@@ -81,6 +85,7 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
     }
 }
 
+/// Halt loop. Uses hlt to save power instead of busy-spinning.
 pub fn hlt_loop() -> ! {
     loop {
         x86_64::instructions::hlt();

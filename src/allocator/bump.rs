@@ -1,5 +1,6 @@
-// Bump allocator (educational, not the active allocator).
-// Moves a pointer forward on alloc. Never frees individual blocks.
+// Bump allocator. Advances a pointer forward on every alloc, never frees
+// individual blocks. Only resets when ALL allocations are dropped.
+// Not the active allocator -- kept here as a reference implementation.
 
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -8,8 +9,8 @@ use super::align_up;
 pub struct BumpAllocator {
     heap_start: usize,
     heap_end: usize,
-    next: usize,
-    allocations: usize,
+    next: usize,       // next free address to hand out
+    allocations: usize, // tracks active allocations for bulk reset
 }
 
 impl BumpAllocator {
@@ -28,6 +29,7 @@ impl BumpAllocator {
         self.next = heap_start;
     }
 
+    /// Align `next` up to the requested alignment, then bump forward by `size`.
     pub fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
         let alloc_start = align_up(self.next, layout.align());
         let alloc_end = alloc_start.checked_add(layout.size()).ok_or(())?;
@@ -42,6 +44,7 @@ impl BumpAllocator {
         Ok(unsafe { NonNull::new_unchecked(alloc_start as *mut u8) })
     }
 
+    /// Can't free individual blocks. Resets the entire heap only when all allocations are dropped.
     pub fn dealloc(&mut self, _ptr: NonNull<u8>, _layout: Layout) {
         self.allocations -= 1;
         if self.allocations == 0 {

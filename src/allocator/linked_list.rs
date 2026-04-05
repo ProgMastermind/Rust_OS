@@ -6,6 +6,8 @@ use core::mem;
 use core::ptr::NonNull;
 use super::align_up;
 
+// Stored inside the free region itself -- no separate metadata allocation needed.
+// This is why the minimum alloc size must be >= size_of::<ListNode>().
 struct ListNode {
     size: usize,
     next: Option<&'static mut ListNode>,
@@ -25,8 +27,9 @@ impl ListNode {
     }
 }
 
+/// Free-list allocator. Walks a linked list of free regions for each alloc. O(n) but supports real dealloc.
 pub struct LinkedListAllocator {
-    head: ListNode,
+    head: ListNode, // dummy head, not a real free region
 }
 
 impl LinkedListAllocator {
@@ -81,6 +84,7 @@ impl LinkedListAllocator {
         }
     }
 
+    /// Walk the free list for a region that fits. Returns the node and aligned start address.
     fn find_region(&mut self, size: usize, align: usize) -> Option<(&'static mut ListNode, usize)> {
         let mut current = &mut self.head;
 
@@ -98,6 +102,7 @@ impl LinkedListAllocator {
         None
     }
 
+    /// Check if a region can satisfy the allocation. Returns aligned start if yes.
     fn alloc_from_region(region: &ListNode, size: usize, align: usize) -> Result<usize, ()> {
         let alloc_start = align_up(region.start_addr(), align);
         let alloc_end = alloc_start.checked_add(size).ok_or(())?;
@@ -115,7 +120,8 @@ impl LinkedListAllocator {
         Ok(alloc_start)
     }
 
-    // Ensure allocations are at least ListNode-sized so freed blocks can hold the node.
+    // Round up layout so freed blocks are large enough to hold a ListNode (16 bytes).
+    // Without this, small allocations couldn't be tracked in the free list after dealloc.
     fn size_align(layout: Layout) -> (usize, usize) {
         let layout = layout
             .align_to(mem::align_of::<ListNode>())
@@ -125,6 +131,7 @@ impl LinkedListAllocator {
         (size, layout.align())
     }
 
+    /// Find a fitting region, split if larger than needed, return the allocation.
     pub fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
         let (size, align) = Self::size_align(layout);
 
@@ -144,6 +151,7 @@ impl LinkedListAllocator {
         }
     }
 
+    /// Return a block to the free list. Coalesces with neighbors automatically.
     pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
         let (size, _) = Self::size_align(layout);
         unsafe {

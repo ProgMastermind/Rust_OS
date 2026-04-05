@@ -13,14 +13,16 @@ use x86_64::VirtAddr;
 const STACK_PAGES: usize = 4;
 const GUARD_PAGES: usize = 1;
 const PAGES_PER_SLOT: usize = STACK_PAGES + GUARD_PAGES;
-const STACK_REGION_BASE: u64 = 0x5555_0000_0000;
+const STACK_REGION_BASE: u64 = 0x5555_0000_0000; // far from heap (0x4444...) and kernel code
 
+/// Virtual address range of a process stack, used for cleanup and guard page detection.
 pub struct StackRegion {
-    pub guard_page_addr: u64,
-    pub stack_bottom: u64,
-    pub stack_top: u64,
+    pub guard_page_addr: u64, // start of the unmapped guard page
+    pub stack_bottom: u64,    // first mapped byte of the stack
+    pub stack_top: u64,       // one past the last mapped byte
 }
 
+/// Why a process is blocked. Lets wakeup target only the right waiters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WaitReason {
     Stdin,
@@ -30,20 +32,22 @@ pub enum WaitReason {
 pub enum ProcessState {
     Ready,
     Running,
-    Blocked(WaitReason),
-    Terminated,
-    Empty,
+    Blocked(WaitReason), // waiting for an event, scheduler skips it
+    Terminated,          // finished, will be reaped next scheduler tick
+    Empty,               // reaped slot, reusable by spawn()
 }
 
+/// Process control block. Holds everything needed to suspend and resume a process.
 pub struct Process {
     pub pid: u64,
     pub state: ProcessState,
-    pub stack_pointer: u64,
-    pub entry_fn: Option<fn()>,
-    pub stack_region: Option<StackRegion>, // None for idle process (boot stack)
-    pub fd_table: Vec<Option<crate::fs::FdEntry>>,
+    pub stack_pointer: u64,           // saved RSP when not running
+    pub entry_fn: Option<fn()>,       // function to execute on first schedule
+    pub stack_region: Option<StackRegion>, // None for idle process (uses boot stack)
+    pub fd_table: Vec<Option<crate::fs::FdEntry>>, // per-process file descriptors
 }
 
+/// All processes. Accessed from scheduler (timer ISR) and kernel_main (spawn).
 pub struct ProcessTable {
     pub processes: Vec<Process>,
     pub current: usize,
@@ -151,8 +155,9 @@ pub fn is_guard_page(addr: u64) -> bool {
     within_slot < 4096
 }
 
+/// First function a new process runs. context_switch's `ret` lands here.
+/// Must re-enable interrupts since context switch ran inside the timer ISR (IF=0).
 fn process_entry() {
-    // Re-enable interrupts (context switch happened inside timer ISR with IF=0)
     x86_64::instructions::interrupts::enable();
 
     let entry = {
@@ -167,6 +172,7 @@ fn process_entry() {
     exit();
 }
 
+/// Mark current process as Terminated and halt. Scheduler will never run it again.
 pub fn exit() {
     let mut table = PROCESS_TABLE.lock();
     let current = table.current;

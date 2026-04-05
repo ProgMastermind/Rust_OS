@@ -4,10 +4,12 @@ use super::context_switch::context_switch;
 use super::{ProcessState, PROCESS_TABLE};
 use alloc::vec::Vec;
 
+/// try_lock to avoid deadlock if called while process table is held elsewhere.
+/// Reaps terminated processes, then picks the next Ready one to switch to.
 pub fn schedule() {
     let mut table = match PROCESS_TABLE.try_lock() {
         Some(table) => table,
-        None => return,
+        None => return, // table locked elsewhere, skip this tick
     };
 
     let num_processes = table.processes.len();

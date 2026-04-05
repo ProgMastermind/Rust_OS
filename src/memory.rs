@@ -16,6 +16,7 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
     unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) }
 }
 
+/// Read PML4 physical address from CR3, convert to virtual using the offset.
 unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
     let (level_4_table_frame, _) = Cr3::read();
     let phys = level_4_table_frame.start_address();
@@ -29,6 +30,7 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut
 static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
 static FRAME_ALLOC: Mutex<Option<BitmapFrameAllocator>> = Mutex::new(None);
 
+/// Store mapper/allocator globally so spawn() can map pages without passing them around.
 pub fn store_globals(mapper: OffsetPageTable<'static>, frame_allocator: BitmapFrameAllocator) {
     *MAPPER.lock() = Some(mapper);
     *FRAME_ALLOC.lock() = Some(frame_allocator);

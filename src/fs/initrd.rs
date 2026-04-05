@@ -2,6 +2,7 @@
 
 use super::{FileInfo, FileSystem};
 
+/// A file baked into the kernel binary at compile time.
 struct RamdiskFile {
     name: &'static str,
     contents: &'static [u8],

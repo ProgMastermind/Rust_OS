@@ -7,6 +7,7 @@ pub mod process;
 use core::cell::UnsafeCell;
 use x86_64::structures::idt::InterruptStackFrame;
 
+// Syscall numbers (used by int 0x80 dispatch)
 pub const SYS_WRITE: u64 = 0;
 pub const SYS_READ: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
@@ -14,6 +15,7 @@ pub const SYS_CLOSE: u64 = 3;
 pub const SYS_EXIT: u64 = 4;
 pub const SYS_GETPID: u64 = 5;
 
+// Error codes (negative return values from syscalls)
 pub const ENOENT: i64 = -1;
 pub const EBADF: i64 = -2;
 pub const EINVAL: i64 = -3;
@@ -56,8 +58,9 @@ static SYSCALL_ARGS: SyncUnsafeCell = SyncUnsafeCell(UnsafeCell::new(SyscallArgs
     return_value: 0,
 }));
 
-const MAX_SYSCALL_BUFFER_LEN: u64 = 1024 * 1024;
+const MAX_SYSCALL_BUFFER_LEN: u64 = 1024 * 1024; // 1MB sanity limit on user buffer size
 
+/// Validate a user pointer before creating a slice: null check, overflow check, size limit.
 pub fn validate_ptr(ptr: u64, len: u64) -> Result<(), i64> {
     if ptr == 0 {
         return Err(EFAULT);
@@ -71,16 +74,19 @@ pub fn validate_ptr(ptr: u64, len: u64) -> Result<(), i64> {
     Ok(())
 }
 
+/// Create a read-only slice from a validated user pointer.
 pub unsafe fn slice_from_user_ptr(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
     validate_ptr(ptr, len)?;
     Ok(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
 }
 
+/// Create a mutable slice from a validated user pointer.
 pub unsafe fn slice_from_user_ptr_mut(ptr: u64, len: u64) -> Result<&'static mut [u8], i64> {
     validate_ptr(ptr, len)?;
     Ok(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) })
 }
 
+/// Caller-side syscall wrapper. Disables interrupts, writes args, fires int 0x80, reads result.
 pub fn syscall(number: u64, arg1: u64, arg2: u64, arg3: u64) -> i64 {
     use core::arch::asm;
 
@@ -99,6 +105,7 @@ pub fn syscall(number: u64, arg1: u64, arg2: u64, arg3: u64) -> i64 {
     })
 }
 
+/// IDT entry 0x80 handler. Dispatches to the appropriate syscall function.
 pub extern "x86-interrupt" fn syscall_handler(_frame: InterruptStackFrame) {
     // SAFETY: inside int 0x80 handler, IF=0
     let args = unsafe { &*SYSCALL_ARGS.0.get() };

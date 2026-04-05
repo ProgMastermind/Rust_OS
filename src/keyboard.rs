@@ -4,6 +4,7 @@ use spin::Mutex;
 
 const BUFFER_SIZE: usize = 256;
 
+/// Circular buffer. Empty when read_pos == write_pos, full when next_write == read_pos.
 struct RingBuffer {
     data: [u8; BUFFER_SIZE],
     read_pos: usize,
@@ -19,6 +20,7 @@ impl RingBuffer {
         }
     }
 
+    /// Returns false if buffer is full (character dropped).
     fn push(&mut self, byte: u8) -> bool {
         let next_write = (self.write_pos + 1) % BUFFER_SIZE;
         if next_write == self.read_pos {
@@ -50,6 +52,7 @@ pub fn push_char(c: u8) {
     crate::process::wake_blocked(crate::process::WaitReason::Stdin);
 }
 
+/// Non-blocking pop. Returns None if buffer is empty.
 pub fn pop_char() -> Option<u8> {
     KEYBOARD_BUFFER.lock().pop()
 }

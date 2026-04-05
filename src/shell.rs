@@ -6,6 +6,7 @@ use crate::{print, println};
 
 const MAX_LINE_LENGTH: usize = 256;
 
+/// Shell entry point. Spawned as a separate process from kernel_main.
 pub fn shell_main() {
     println!();
     println!("Welcome to my_os shell!");
@@ -51,6 +52,7 @@ fn read_stdin_char() -> u8 {
     }
 }
 
+/// Read a line into buf with echo and backspace handling. Returns length (excluding newline).
 fn read_line(buf: &mut [u8]) -> usize {
     let mut pos = 0;
 
@@ -62,10 +64,10 @@ fn read_line(buf: &mut [u8]) -> usize {
                 println!();
                 return pos;
             }
-            0x08 | 0x7F => {
+            0x08 | 0x7F => { // backspace (BS) or delete (DEL)
                 if pos > 0 {
                     pos -= 1;
-                    print!("\x08 \x08");
+                    print!("\x08 \x08"); // move back, overwrite with space, move back again
                 }
             }
             // printable ASCII only
@@ -203,7 +205,7 @@ fn cmd_uptime() {
     use core::sync::atomic::Ordering;
 
     let ticks = TICKS.load(Ordering::Relaxed);
-    let seconds = ticks / 18;
+    let seconds = ticks / 18; // PIT default frequency is ~18.2 Hz
     println!("Uptime: {} ticks (~{} seconds)", ticks, seconds);
 }
 

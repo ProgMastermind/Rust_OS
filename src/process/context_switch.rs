@@ -1,4 +1,7 @@
-// Context switch. Saves/restores callee-saved registers and swaps RSP.
+// Context switch. Push callee-saved regs, save RSP, load new RSP, pop regs, ret.
+// Only callee-saved registers (rbp, rbx, r12-r15) need saving since
+// context_switch looks like a function call to the old process.
+// rdi = pointer to old process's saved RSP, rsi = new process's RSP.
 
 use core::arch::naked_asm;
 
